@@ -1,0 +1,10 @@
+---
+description: Route Cursor agents through the project governance system.
+alwaysApply: true
+---
+
+Read `AGENTS.md` before acting. It owns the platform-neutral session protocol.
+
+Treat `docs/waves/README.md` as the sole wave-status authority. Confirm the canonical
+worktree with `governancectl status`; do not overwrite or discard variants in other
+worktrees. Cursor hooks are enforcement aids, not approval for gated work.

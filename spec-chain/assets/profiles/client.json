@@ -1,0 +1,11 @@
+{
+  "name": "client",
+  "title_suffix": "Client specification",
+  "confidentiality": "",
+  "include_technology": false,
+  "include_source_paths": false,
+  "include_verification_register": false,
+  "page_size": "LETTER",
+  "font": "Calibri",
+  "brand_color": "1B5E3F"
+}

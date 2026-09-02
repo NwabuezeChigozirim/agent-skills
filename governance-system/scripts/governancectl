@@ -1,0 +1,1527 @@
+#!/usr/bin/env python3
+"""Deterministic governance runtime for local Git worktrees."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from typing import Any, Iterator
+
+
+SCHEMA_VERSION = 3
+LEGACY_SCHEMA_VERSIONS = {2}
+SUITE_VERSION = "2.1.0"
+EXIT_USAGE = 2
+EXIT_VALIDATION = 3
+EXIT_GATE = 4
+EXIT_UNSAFE = 5
+MAX_SNAPSHOT_BYTES = 200 * 1024 * 1024
+SENSITIVE_NAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    "credentials.json",
+    "secrets.json",
+    "id_rsa",
+    "id_ed25519",
+}
+
+
+class GovernanceError(RuntimeError):
+    def __init__(self, message: str, exit_code: int = 1):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def run_process(
+    command: list[str],
+    cwd: Path,
+    *,
+    check: bool = True,
+    text: bool = True,
+) -> subprocess.CompletedProcess[Any]:
+    result = subprocess.run(
+        command,
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=text,
+    )
+    if check and result.returncode != 0:
+        stderr = result.stderr.strip() if text else result.stderr.decode(errors="replace").strip()
+        raise GovernanceError(
+            f"Command failed ({result.returncode}): {' '.join(command)}"
+            + (f": {stderr}" if stderr else ""),
+            EXIT_VALIDATION,
+        )
+    return result
+
+
+def git(repo: Path, *args: str, check: bool = True) -> str:
+    result = run_process(["git", *args], repo, check=check, text=True)
+    return result.stdout.strip()
+
+
+def git_bytes(repo: Path, *args: str, check: bool = True) -> bytes:
+    result = run_process(["git", *args], repo, check=check, text=False)
+    return result.stdout
+
+
+def resolve_repo(value: str) -> Path:
+    repo = Path(value).expanduser().resolve()
+    if not repo.is_dir():
+        raise GovernanceError(f"Repository path does not exist: {repo}", EXIT_USAGE)
+    if git(repo, "rev-parse", "--is-inside-work-tree", check=False) != "true":
+        raise GovernanceError(f"Not a Git worktree: {repo}", EXIT_USAGE)
+    return repo
+
+
+def repository_root(repo: Path) -> Path:
+    return Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
+
+
+def common_git_dir(repo: Path) -> Path:
+    raw = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not raw.is_absolute():
+        raw = repository_root(repo) / raw
+    return raw.resolve()
+
+
+def state_dir(repo: Path) -> Path:
+    return common_git_dir(repo) / "governance"
+
+
+def config_path(repo: Path) -> Path:
+    return repository_root(repo) / ".governance" / "config.json"
+
+
+def state_path(repo: Path, name: str) -> Path:
+    return state_dir(repo) / name
+
+
+def read_json(path: Path, default: Any = None) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GovernanceError(f"Malformed governance JSON: {path}: {exc}", EXIT_VALIDATION)
+
+
+def atomic_write_json(path: Path, value: Any, *, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+@contextlib.contextmanager
+def state_lock(repo: Path) -> Iterator[None]:
+    directory = state_dir(repo)
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / "runtime.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def branch_name(repo: Path) -> str:
+    branch = git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    return branch or "(detached)"
+
+
+def current_head(repo: Path) -> str:
+    return git(repo, "rev-parse", "HEAD")
+
+
+def repo_identity(repo: Path) -> str:
+    # Root commits are identical in every clone and worktree, unlike filesystem paths,
+    # so a committed config keeps working after a clone or a move.
+    roots = git(repo, "rev-list", "--max-parents=0", "HEAD", check=False)
+    if not roots:
+        raise GovernanceError(
+            "Repository has no commits; create an initial commit before enabling governance",
+            EXIT_USAGE,
+        )
+    joined = "\n".join(sorted(roots.split()))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:20]
+
+
+def main_worktree(repo: Path) -> Path:
+    records = parse_worktrees(repo)
+    if not records:
+        return repository_root(repo)
+    return Path(records[0]["path"])
+
+
+def canonical_state_path(repo: Path) -> Path:
+    return state_path(repo, "canonical.json")
+
+
+def load_canonical(repo: Path) -> dict[str, Any]:
+    stored = read_json(canonical_state_path(repo))
+    if stored is None:
+        default = main_worktree(repo)
+        stored = {
+            "schema_version": SCHEMA_VERSION,
+            "canonical_worktree": str(default),
+            "canonical_branch": branch_name(default),
+            "selected_by": "default-main-worktree",
+            "updated_at": utc_now(),
+        }
+        atomic_write_json(canonical_state_path(repo), stored)
+    return stored
+
+
+def save_canonical(repo: Path, worktree: Path, selected_by: str) -> dict[str, Any]:
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "canonical_worktree": str(worktree),
+        "canonical_branch": branch_name(worktree),
+        "selected_by": selected_by,
+        "updated_at": utc_now(),
+    }
+    atomic_write_json(canonical_state_path(repo), record)
+    return record
+
+
+def parse_worktrees(repo: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+    output = git(repo, "worktree", "list", "--porcelain")
+    for line in output.splitlines() + [""]:
+        if not line:
+            if current:
+                current["path"] = str(Path(current["path"]).resolve())
+                records.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        if key == "worktree":
+            current["path"] = value
+        elif key == "HEAD":
+            current["head"] = value
+        elif key == "branch":
+            current["branch"] = value.removeprefix("refs/heads/")
+        elif key in {"detached", "bare", "locked", "prunable"}:
+            current[key] = value or True
+    return records
+
+
+def parse_status(worktree: Path) -> dict[str, Any]:
+    raw = git_bytes(
+        worktree,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    )
+    tokens = raw.decode("utf-8", errors="surrogateescape").split("\0")
+    staged: set[str] = set()
+    unstaged: set[str] = set()
+    untracked: set[str] = set()
+    all_paths: set[str] = set()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if not token:
+            continue
+        if len(token) < 4:
+            continue
+        status = token[:2]
+        path = token[3:]
+        if status[0] in {"R", "C"} and index < len(tokens):
+            original = tokens[index]
+            index += 1
+            if original:
+                all_paths.add(original)
+        all_paths.add(path)
+        if status == "??":
+            untracked.add(path)
+        else:
+            if status[0] != " ":
+                staged.add(path)
+            if status[1] != " ":
+                unstaged.add(path)
+    return {
+        "staged": sorted(staged),
+        "unstaged": sorted(unstaged),
+        "untracked": sorted(untracked),
+        "dirty_paths": sorted(all_paths),
+        "dirty": bool(all_paths),
+    }
+
+
+def hash_dirty_files(worktree: Path, paths: list[str]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for relative in paths:
+        candidate = (worktree / relative).resolve()
+        try:
+            candidate.relative_to(worktree.resolve())
+        except ValueError:
+            continue
+        if candidate.is_file() and not candidate.is_symlink():
+            digest = hashlib.sha256()
+            try:
+                with candidate.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                hashes[relative] = digest.hexdigest()
+            except OSError:
+                hashes[relative] = "unreadable"
+        elif not candidate.exists():
+            hashes[relative] = "deleted"
+    return hashes
+
+
+def divergence(canonical: Path, canonical_head: str, other: Path, other_head: str) -> dict[str, Any]:
+    if canonical_head == other_head:
+        return {"ahead": 0, "behind": 0, "diverged": False}
+    raw = git(canonical, "rev-list", "--left-right", "--count", f"{canonical_head}...{other_head}", check=False)
+    match = re.fullmatch(r"(\d+)\s+(\d+)", raw)
+    if not match:
+        return {"ahead": None, "behind": None, "diverged": True}
+    canonical_only, other_only = int(match.group(1)), int(match.group(2))
+    return {
+        "ahead": other_only,
+        "behind": canonical_only,
+        "diverged": canonical_only > 0 and other_only > 0,
+    }
+
+
+def load_config(repo: Path, *, required: bool = False) -> dict[str, Any] | None:
+    config = read_json(config_path(repo))
+    if config is None and required:
+        raise GovernanceError(
+            "Governance is not initialized; .governance/config.json is missing",
+            EXIT_VALIDATION,
+        )
+    if config is not None:
+        version = config.get("schema_version")
+        if version in LEGACY_SCHEMA_VERSIONS:
+            config = migrate_legacy_config(repo, config)
+        elif version != SCHEMA_VERSION:
+            raise GovernanceError("Unsupported governance config schema", EXIT_VALIDATION)
+        if config.get("repository_id") != repo_identity(repo):
+            raise GovernanceError("Governance config belongs to a different repository", EXIT_VALIDATION)
+    return config
+
+
+def migrate_legacy_config(repo: Path, legacy: dict[str, Any]) -> dict[str, Any]:
+    # v2 stored a path-derived repository_id and absolute canonical paths in the
+    # committed file. Move the machine-specific parts to local state and re-derive
+    # the identity from history.
+    previous_canonical = legacy.get("canonical_worktree")
+    if previous_canonical and not canonical_state_path(repo).exists():
+        candidate = Path(previous_canonical).expanduser()
+        listed = {Path(item["path"]).resolve() for item in parse_worktrees(repo)}
+        if candidate.is_dir() and candidate.resolve() in listed:
+            save_canonical(repo, candidate.resolve(), "migrated-from-v2-config")
+    config = {
+        "schema_version": SCHEMA_VERSION,
+        "suite_version": SUITE_VERSION,
+        "repository_id": repo_identity(repo),
+        "enabled": bool(legacy.get("enabled", True)),
+        "hooks_enabled": bool(legacy.get("hooks_enabled", False)),
+        "project_slug": legacy.get("project_slug") or default_project_slug(repo),
+        "created_at": legacy.get("created_at") or utc_now(),
+        "migrated_at": utc_now(),
+    }
+    for key in ("hooks_installed_at",):
+        if key in legacy:
+            config[key] = legacy[key]
+    atomic_write_json(config_path(repo), config, mode=0o644)
+    return config
+
+
+def default_project_slug(repo: Path) -> str:
+    root = repository_root(repo)
+    return re.sub(r"[^a-z0-9]+", "-", root.name.lower()).strip("-") or "project"
+
+
+def ensure_config(repo: Path) -> dict[str, Any]:
+    existing = load_config(repo)
+    if existing is not None:
+        return existing
+    config = {
+        "schema_version": SCHEMA_VERSION,
+        "suite_version": SUITE_VERSION,
+        "repository_id": repo_identity(repo),
+        "enabled": True,
+        "hooks_enabled": False,
+        "project_slug": default_project_slug(repo),
+        "created_at": utc_now(),
+    }
+    atomic_write_json(config_path(repo), config, mode=0o644)
+    return config
+
+
+def canonical_repo(repo: Path) -> Path:
+    record = load_canonical(repo)
+    canonical = Path(record["canonical_worktree"]).expanduser().resolve()
+    listed = {Path(item["path"]).resolve() for item in parse_worktrees(repo)}
+    if canonical not in listed:
+        raise GovernanceError(
+            f"Configured canonical worktree is unavailable: {canonical}",
+            EXIT_GATE,
+        )
+    return canonical
+
+
+def inventory(repo: Path) -> dict[str, Any]:
+    canonical = canonical_repo(repo)
+    canonical_head = current_head(canonical)
+    items: list[dict[str, Any]] = []
+    for entry in parse_worktrees(repo):
+        worktree = Path(entry["path"])
+        if entry.get("bare") or not worktree.is_dir():
+            status = {
+                "staged": [],
+                "unstaged": [],
+                "untracked": [],
+                "dirty_paths": [],
+                "dirty": False,
+            }
+            hashes: dict[str, str] = {}
+        else:
+            status = parse_status(worktree)
+            hashes = hash_dirty_files(worktree, status["dirty_paths"])
+        head = entry.get("head") or current_head(worktree)
+        item = {
+            **entry,
+            **status,
+            "hashes": hashes,
+            "canonical": worktree.resolve() == canonical,
+            "divergence": divergence(canonical, canonical_head, worktree, head),
+            "scanned_at": utc_now(),
+        }
+        items.append(item)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "repository_id": repo_identity(repo),
+        "canonical_worktree": str(canonical),
+        "canonical_branch": branch_name(canonical),
+        "canonical_head": canonical_head,
+        "worktrees": items,
+        "scanned_at": utc_now(),
+    }
+
+
+PHASES = [
+    "discovery",
+    "resolution",
+    "intent",
+    "specification",
+    "planning",
+    "operations",
+    "validation",
+    "handoff",
+]
+NOTE_KINDS = {
+    "observation": "observations",
+    "hypothesis": "hypotheses",
+    "needs-owner": "needs_owner",
+    "blocking": "blocking_items",
+}
+PROVENANCE = ["code", "test", "ci", "git", "owner", "hypothesis", "needs-owner"]
+# Mirrors spec-chain/references/need-first.md §5; the class travels unchanged into
+# DECISIONS.md and the CON.
+EVIDENCE_CLASSES = [
+    "fact",
+    "observed-behavior",
+    "stakeholder-requirement",
+    "domain-constraint",
+    "accepted-decision",
+    "hypothesis",
+    "assumption",
+    "preference",
+    "aesthetic-choice",
+]
+
+
+def start_or_refresh_run(repo: Path, registry: dict[str, Any]) -> dict[str, Any]:
+    path = state_path(repo, "run-state.json")
+    state = read_json(path, {})
+    if not state or state.get("status") == "closed":
+        state = {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+            "repository_id": repo_identity(repo),
+            "status": "active",
+            "phase": "discovery",
+            "started_at": utc_now(),
+            "owner_close_approved": False,
+            "next_action": "Review discovery evidence and resolve blocking worktree variants",
+        }
+    # Refreshes only track canonical state; phase and next_action belong to reconcile,
+    # phase and close-stage so that hook-driven rediscovery never rewinds progress.
+    state.update(
+        {
+            "canonical_worktree": registry["canonical_worktree"],
+            "canonical_branch": registry["canonical_branch"],
+            "canonical_head": registry["canonical_head"],
+            "updated_at": utc_now(),
+        }
+    )
+    atomic_write_json(path, state)
+    return state
+
+
+def discovery_notes(repo: Path) -> list[dict[str, Any]]:
+    stored = read_json(state_path(repo, "discovery-notes.json"), {"notes": []})
+    notes = stored.get("notes", []) if isinstance(stored, dict) else []
+    return [item for item in notes if isinstance(item, dict)]
+
+
+def command_note(
+    repo: Path,
+    kind: str,
+    text: str,
+    evidence: str | None,
+    provenance: str | None,
+    evidence_class: str | None = None,
+) -> dict[str, Any]:
+    if kind not in NOTE_KINDS:
+        raise GovernanceError(f"Unsupported note kind: {kind}", EXIT_USAGE)
+    if not text.strip():
+        raise GovernanceError("Note text is required", EXIT_USAGE)
+    if provenance is None:
+        provenance = {"hypothesis": "hypothesis", "needs-owner": "needs-owner", "blocking": "needs-owner"}.get(kind, "code")
+    if provenance not in PROVENANCE:
+        raise GovernanceError(f"Unsupported provenance: {provenance}", EXIT_USAGE)
+    if provenance in {"code", "test", "ci", "git"} and not (evidence or "").strip():
+        raise GovernanceError(f"Provenance '{provenance}' requires --evidence (path, command or commit)", EXIT_USAGE)
+    if evidence_class is None:
+        # A hypothesis note is a hypothesis; anything read from the repository is observed
+        # behavior of the current system until the owner classes it otherwise.
+        evidence_class = "hypothesis" if kind == "hypothesis" else "observed-behavior" if provenance in {"code", "test", "ci", "git"} else "assumption"
+    if evidence_class not in EVIDENCE_CLASSES:
+        raise GovernanceError(f"Unsupported evidence class: {evidence_class}", EXIT_USAGE)
+    with state_lock(repo):
+        load_config(repo, required=True)
+        path = state_path(repo, "discovery-notes.json")
+        stored = read_json(path, {"schema_version": SCHEMA_VERSION, "notes": []})
+        notes = stored.get("notes", [])
+        used = {
+            int(match.group(1))
+            for item in notes
+            if (match := re.fullmatch(r"N-(\d+)", str(item.get("id", ""))))
+        }
+        note = {
+            "id": f"N-{max(used, default=0) + 1:03d}",
+            "kind": kind,
+            "text": text.strip(),
+            "evidence": (evidence or "").strip() or None,
+            "provenance": provenance,
+            "evidence_class": evidence_class,
+            "created_at": utc_now(),
+        }
+        notes.append(note)
+        stored["notes"] = notes
+        stored["schema_version"] = SCHEMA_VERSION
+        stored["updated_at"] = utc_now()
+        atomic_write_json(path, stored)
+        registry = read_json(state_path(repo, "registry.json"))
+        if registry is not None:
+            atomic_write_json(state_path(repo, "discovery.json"), discovery_packet(repo, registry))
+    return {
+        "id": note["id"],
+        "kind": kind,
+        "provenance": provenance,
+        "evidence_class": evidence_class,
+        "notes_total": len(notes),
+    }
+
+
+def command_phase(repo: Path, phase: str, next_action: str | None) -> dict[str, Any]:
+    if phase not in PHASES:
+        raise GovernanceError(f"Unsupported phase: {phase}", EXIT_USAGE)
+    with state_lock(repo):
+        load_config(repo, required=True)
+        path = state_path(repo, "run-state.json")
+        run = read_json(path)
+        if run is None or run.get("status") != "active":
+            raise GovernanceError("No active governance run; run discover", EXIT_VALIDATION)
+        run["phase"] = phase
+        if next_action and next_action.strip():
+            run["next_action"] = next_action.strip()
+        run["updated_at"] = utc_now()
+        atomic_write_json(path, run)
+    return {"run_id": run.get("run_id"), "phase": phase, "next_action": run.get("next_action")}
+
+
+def discovery_packet(repo: Path, registry: dict[str, Any]) -> dict[str, Any]:
+    root = Path(registry["canonical_worktree"])
+    intent_candidates = [
+        "README.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "design.md",
+        "DECISIONS.md",
+        "docs",
+    ]
+    present = [name for name in intent_candidates if (root / name).exists()]
+    source_suffixes = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".rb", ".php"}
+    source_count = 0
+    for candidate in root.rglob("*"):
+        if ".git" in candidate.parts or not candidate.is_file():
+            continue
+        if candidate.suffix.lower() in source_suffixes:
+            source_count += 1
+            if source_count >= 20:
+                break
+    mode = "brownfield" if source_count else "greenfield"
+    if source_count and any(name in present for name in {"design.md", "DECISIONS.md", "docs"}):
+        mode = "mixed"
+    grouped: dict[str, list[dict[str, Any]]] = {field: [] for field in NOTE_KINDS.values()}
+    for note in discovery_notes(repo):
+        field = NOTE_KINDS.get(str(note.get("kind")))
+        if field:
+            grouped[field].append(note)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "repository_id": repo_identity(repo),
+        "mode": mode,
+        "canonical_worktree": registry["canonical_worktree"],
+        "canonical_head": registry["canonical_head"],
+        "intent_sources_present": present,
+        "source_files_detected": source_count,
+        "worktree_summary": [
+            {
+                "path": item["path"],
+                "branch": item.get("branch", "(detached)"),
+                "head": item.get("head"),
+                "dirty": item["dirty"],
+                "dirty_paths": item["dirty_paths"],
+            }
+            for item in registry["worktrees"]
+        ],
+        "observations": grouped["observations"],
+        "hypotheses": grouped["hypotheses"],
+        "needs_owner": grouped["needs_owner"],
+        "blocking_items": grouped["blocking_items"],
+        "generated_at": utc_now(),
+    }
+
+
+def is_sensitive_path(relative: str) -> bool:
+    path = Path(relative)
+    lowered = {part.lower() for part in path.parts}
+    name = path.name.lower()
+    return (
+        name in SENSITIVE_NAMES
+        or name.startswith(".env.")
+        or "secrets" in lowered
+        or "credentials" in lowered
+        or ".ssh" in lowered
+    )
+
+
+def safe_snapshot_name(worktree: dict[str, Any]) -> str:
+    path_hash = hashlib.sha256(worktree["path"].encode("utf-8")).hexdigest()[:10]
+    return f"{path_hash}-{worktree.get('head', 'unknown')[:12]}"
+
+
+def snapshot_worktree(repo: Path, worktree: dict[str, Any]) -> dict[str, Any]:
+    root = Path(worktree["path"])
+    snapshot_root = state_dir(repo) / "snapshots"
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    identifier = safe_snapshot_name(worktree)
+    patch_path = snapshot_root / f"{identifier}.patch"
+    archive_path = snapshot_root / f"{identifier}-untracked.tar.gz"
+    manifest_path = snapshot_root / f"{identifier}.json"
+
+    patch = git_bytes(root, "diff", "--binary", "HEAD")
+    if len(patch) > MAX_SNAPSHOT_BYTES:
+        raise GovernanceError(
+            f"Tracked snapshot exceeds {MAX_SNAPSHOT_BYTES} bytes for {root}",
+            EXIT_UNSAFE,
+        )
+    patch_path.write_bytes(patch)
+    os.chmod(patch_path, 0o600)
+
+    included: list[str] = []
+    excluded_sensitive: list[str] = []
+    skipped: list[str] = []
+    total = 0
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for relative in worktree["untracked"]:
+            candidate = (root / relative).resolve()
+            try:
+                candidate.relative_to(root.resolve())
+            except ValueError:
+                skipped.append(relative)
+                continue
+            if is_sensitive_path(relative):
+                excluded_sensitive.append(relative)
+                continue
+            if not candidate.is_file() or candidate.is_symlink():
+                skipped.append(relative)
+                continue
+            size = candidate.stat().st_size
+            if total + size > MAX_SNAPSHOT_BYTES:
+                skipped.append(relative)
+                continue
+            archive.add(candidate, arcname=relative, recursive=False)
+            total += size
+            included.append(relative)
+    os.chmod(archive_path, 0o600)
+
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "snapshot_id": identifier,
+        "worktree": worktree["path"],
+        "branch": worktree.get("branch", "(detached)"),
+        "head": worktree.get("head"),
+        "dirty_paths": worktree["dirty_paths"],
+        "tracked_patch": str(patch_path),
+        "untracked_archive": str(archive_path),
+        "untracked_included": included,
+        "untracked_excluded_sensitive": excluded_sensitive,
+        "untracked_skipped": skipped,
+        "created_at": utc_now(),
+    }
+    atomic_write_json(manifest_path, manifest)
+    return manifest
+
+
+def resolution_key(kind: str, worktrees: list[str], paths: list[str]) -> str:
+    raw = json.dumps([kind, sorted(worktrees), sorted(paths)], separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def build_resolutions(
+    repo: Path,
+    registry: dict[str, Any],
+    snapshots: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    path = state_path(repo, "resolutions.json")
+    previous = read_json(path, {"records": []})
+    previous_by_key = {item["key"]: item for item in previous.get("records", [])}
+    proposed: list[dict[str, Any]] = []
+    worktrees = registry["worktrees"]
+
+    for left_index, left in enumerate(worktrees):
+        left_paths = set(left["dirty_paths"])
+        if not left_paths:
+            continue
+        for right in worktrees[left_index + 1 :]:
+            overlap = sorted(left_paths.intersection(right["dirty_paths"]))
+            if not overlap:
+                continue
+            names = [left["path"], right["path"]]
+            key = resolution_key("overlapping-paths", names, overlap)
+            record = previous_by_key.get(key, {})
+            proposed.append(
+                {
+                    "id": record.get("id"),
+                    "key": key,
+                    "kind": "overlapping-paths",
+                    "worktrees": names,
+                    "paths": overlap,
+                    "snapshots": [snapshots.get(name, {}).get("snapshot_id") for name in names],
+                    "recommendation": "Review both snapshots and choose keep, adopt, combine, defer, or obsolete",
+                    "choice": record.get("choice"),
+                    "note": record.get("note"),
+                    "status": record.get("status", "needs-owner"),
+                    "created_at": record.get("created_at", utc_now()),
+                    "updated_at": utc_now(),
+                }
+            )
+
+    canonical = next(item for item in worktrees if item["canonical"])
+    for item in worktrees:
+        if item["canonical"] or not item["dirty"]:
+            continue
+        names = [canonical["path"], item["path"]]
+        key = resolution_key("unfinished-variant", names, item["dirty_paths"])
+        record = previous_by_key.get(key, {})
+        proposed.append(
+            {
+                "id": record.get("id"),
+                "key": key,
+                "kind": "unfinished-variant",
+                "worktrees": names,
+                "paths": item["dirty_paths"],
+                "snapshots": [snapshots.get(item["path"], {}).get("snapshot_id")],
+                "recommendation": "Integrate, defer, obsolete, or return this unfinished variant before stage closure",
+                "choice": record.get("choice"),
+                "note": record.get("note"),
+                "status": record.get("status", "needs-owner"),
+                "created_at": record.get("created_at", utc_now()),
+                "updated_at": utc_now(),
+            }
+        )
+
+    for item in worktrees:
+        if item["canonical"]:
+            continue
+        ahead = item["divergence"].get("ahead")
+        # Committed-but-unmerged work is a variant too; a clean worktree that is ahead
+        # of canonical must still receive an owner disposition. ahead=None means the
+        # histories could not be compared, which is treated as divergent.
+        if ahead is not None and ahead <= 0:
+            continue
+        names = [canonical["path"], item["path"]]
+        key = resolution_key("divergent-base", names, [])
+        record = previous_by_key.get(key, {})
+        snapshot_id = snapshots.get(item["path"], {}).get("snapshot_id")
+        proposed.append(
+            {
+                "id": record.get("id"),
+                "key": key,
+                "kind": "divergent-base",
+                "worktrees": names,
+                "paths": item["dirty_paths"],
+                "head": item.get("head"),
+                "branch": item.get("branch", "(detached)"),
+                "ahead": ahead,
+                "behind": item["divergence"].get("behind"),
+                "snapshots": [snapshot_id] if snapshot_id else [],
+                "recommendation": (
+                    f"Worktree is {'an unknown number of' if ahead is None else ahead} commit(s) ahead of canonical; "
+                    "commits are recoverable by ref. Integrate, defer, or mark obsolete after the owner selects canonical intent"
+                ),
+                "choice": record.get("choice"),
+                "note": record.get("note"),
+                "status": record.get("status", "needs-owner"),
+                "created_at": record.get("created_at", utc_now()),
+                "updated_at": utc_now(),
+            }
+        )
+
+    proposed_keys = {item["key"] for item in proposed}
+    for previous_record in previous.get("records", []):
+        if previous_record.get("key") in proposed_keys:
+            continue
+        carried = dict(previous_record)
+        if carried.get("status") in {"pending", "needs-owner"}:
+            # The variant no longer exists (integrated, cleaned or committed under a new
+            # key), so the disposition is complete. Snapshots remain on disk.
+            carried["status"] = "resolved"
+            carried["resolved_at"] = utc_now()
+            existing_note = (carried.get("note") or "").strip()
+            auto_note = "variant no longer present at reconcile"
+            carried["note"] = f"{existing_note} | {auto_note}" if existing_note else auto_note
+        carried["updated_at"] = utc_now()
+        proposed.append(carried)
+
+    used_ids = {
+        int(match.group(1))
+        for item in previous.get("records", [])
+        if (match := re.fullmatch(r"R-(\d+)", str(item.get("id", ""))))
+    }
+    next_id = max(used_ids, default=0) + 1
+    for item in proposed:
+        if item["id"] is None:
+            item["id"] = f"R-{next_id:03d}"
+            next_id += 1
+    proposed.sort(key=lambda item: item["id"])
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "repository_id": repo_identity(repo),
+        "records": proposed,
+        "updated_at": utc_now(),
+    }
+    atomic_write_json(path, result)
+    return result
+
+
+def unresolved_records(repo: Path) -> list[dict[str, Any]]:
+    resolutions = read_json(state_path(repo, "resolutions.json"), {"records": []})
+    return [
+        item
+        for item in resolutions.get("records", [])
+        if item.get("status") not in {"resolved", "deferred", "obsolete"}
+    ]
+
+
+# Shared template-placeholder detector. Keep byte-identical with the copies in
+# plan-waves-slices/scripts/validate_plan.py and spec-chain/scripts/validate_spec.py.
+# Matches <Project Name>, <install-command>, <YYYY-MM-DD>, <N>; ignores HTML tags,
+# generics such as Vec<T>, autolinks <https://...> and <user@host> addresses.
+PLACEHOLDER_RE = re.compile(r"(?<!\w)<(?!\w+://)([A-Za-z][^<>\n@]{0,120})>")
+HTML_TAGS = {
+    "a", "abbr", "b", "blockquote", "br", "code", "dd", "del", "details", "div", "dl", "dt", "em",
+    "figcaption", "figure", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "ins", "kbd", "li",
+    "mark", "ol", "p", "pre", "s", "samp", "small", "span", "strong", "sub", "summary", "sup", "table",
+    "tbody", "td", "tfoot", "th", "thead", "tr", "u", "ul", "var",
+}
+
+
+def find_placeholders(text: str) -> list[str]:
+    found = {
+        match.group(0)
+        for match in PLACEHOLDER_RE.finditer(text)
+        if match.group(1).split()[0].lower().rstrip("/") not in HTML_TAGS
+    }
+    return sorted(found)
+
+
+def validate_generated_docs(root: Path) -> list[str]:
+    errors: list[str] = []
+    expected = [
+        root / "AGENTS.md",
+        root / "CLAUDE.md",
+        root / "design.md",
+        root / "DECISIONS.md",
+        root / "Implementations.md",
+        root / "README.md",
+        root / "docs" / "waves" / "README.md",
+    ]
+    present_any = any(path.exists() for path in expected)
+    if not present_any:
+        return errors
+    for path in expected:
+        if not path.exists():
+            errors.append(f"Missing governance artifact: {path.relative_to(root)}")
+    scan = list(expected) + sorted((root / "docs" / "waves").glob("*.md"))
+    seen: set[Path] = set()
+    for path in scan:
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        placeholders = find_placeholders(text)
+        if placeholders:
+            preview = ", ".join(placeholders[:5]) + (" ..." if len(placeholders) > 5 else "")
+            errors.append(f"Unresolved template placeholder in {path.relative_to(root)}: {preview}")
+    waves = root / "docs" / "waves" / "README.md"
+    if waves.exists():
+        text = waves.read_text(encoding="utf-8", errors="replace")
+        if "⏸ gated · 🟡 approved & in progress · ✅ done & signed off" not in text:
+            errors.append("Wave status legend is missing or changed")
+    return errors
+
+
+def command_doctor(repo: Path) -> dict[str, Any]:
+    root = repository_root(repo)
+    config = load_config(repo)
+    canonical = read_json(canonical_state_path(repo))
+    return {
+        "ok": True,
+        "python": sys.version.split()[0],
+        "git": git(repo, "--version"),
+        "repository": str(root),
+        "repository_id": repo_identity(repo),
+        "common_git_dir": str(common_git_dir(repo)),
+        "configured": config is not None,
+        "config_schema": config.get("schema_version") if config else None,
+        "canonical_worktree": canonical.get("canonical_worktree") if canonical else None,
+        "hooks_enabled": bool(config and config.get("hooks_enabled")),
+        "mode": "resume" if state_path(repo, "run-state.json").exists() else "install",
+    }
+
+
+def command_set_canonical(repo: Path, target: str) -> dict[str, Any]:
+    load_config(repo, required=True)
+    candidate = Path(target).expanduser().resolve()
+    listed = {Path(item["path"]).resolve() for item in parse_worktrees(repo)}
+    if candidate not in listed:
+        raise GovernanceError(f"Not a registered worktree of this repository: {candidate}", EXIT_USAGE)
+    with state_lock(repo):
+        record = save_canonical(repo, candidate, "owner")
+        registry = inventory(repo)
+        atomic_write_json(state_path(repo, "registry.json"), registry)
+        start_or_refresh_run(repo, registry)
+    return {
+        "canonical_worktree": record["canonical_worktree"],
+        "canonical_branch": record["canonical_branch"],
+        "canonical_head": registry["canonical_head"],
+    }
+
+
+def command_status(repo: Path) -> dict[str, Any]:
+    config = load_config(repo)
+    run = read_json(state_path(repo, "run-state.json"))
+    registry = read_json(state_path(repo, "registry.json"))
+    resolutions = read_json(state_path(repo, "resolutions.json"), {"records": []})
+    return {
+        "configured": config is not None,
+        "enabled": bool(config and config.get("enabled")),
+        "hooks_enabled": bool(config and config.get("hooks_enabled")),
+        "run": run,
+        "registry_summary": None
+        if registry is None
+        else {
+            "canonical_worktree": registry.get("canonical_worktree"),
+            "canonical_branch": registry.get("canonical_branch"),
+            "canonical_head": registry.get("canonical_head"),
+            "worktree_count": len(registry.get("worktrees", [])),
+            "dirty_worktree_count": sum(1 for item in registry.get("worktrees", []) if item.get("dirty")),
+            "scanned_at": registry.get("scanned_at"),
+        },
+        "resolution_summary": {
+            "total": len(resolutions.get("records", [])),
+            "unresolved": len(unresolved_records(repo)),
+        },
+    }
+
+
+def command_discover(repo: Path) -> dict[str, Any]:
+    with state_lock(repo):
+        ensure_config(repo)
+        registry = inventory(repo)
+        packet = discovery_packet(repo, registry)
+        atomic_write_json(state_path(repo, "registry.json"), registry)
+        atomic_write_json(state_path(repo, "discovery.json"), packet)
+        run = start_or_refresh_run(repo, registry)
+    return {
+        "registry": str(state_path(repo, "registry.json")),
+        "discovery_packet": str(state_path(repo, "discovery.json")),
+        "worktree_count": len(registry["worktrees"]),
+        "dirty_worktree_count": sum(1 for item in registry["worktrees"] if item["dirty"]),
+        "mode": packet["mode"],
+        "run_id": run["run_id"],
+    }
+
+
+def command_reconcile(repo: Path) -> dict[str, Any]:
+    with state_lock(repo):
+        load_config(repo, required=True)
+        registry = inventory(repo)
+        snapshots: dict[str, dict[str, Any]] = {}
+        for item in registry["worktrees"]:
+            if item["dirty"]:
+                snapshots[item["path"]] = snapshot_worktree(repo, item)
+        atomic_write_json(state_path(repo, "registry.json"), registry)
+        resolutions = build_resolutions(repo, registry, snapshots)
+        run = start_or_refresh_run(repo, registry)
+        unresolved = unresolved_records(repo)
+        if unresolved:
+            run["phase"] = "resolution"
+            run["next_action"] = "Obtain owner choices for unresolved resolution records"
+        elif run.get("phase") in {"discovery", "resolution"}:
+            # Only advance out of the early phases; a hook-triggered reconcile during
+            # planning or later must not rewind progress recorded via `phase`.
+            run["phase"] = "intent"
+            run["next_action"] = "Ratify blocking intent and author canonical decisions"
+        atomic_write_json(state_path(repo, "run-state.json"), run)
+    return {
+        "snapshots_created": len(snapshots),
+        "resolution_count": len(resolutions["records"]),
+        "unresolved": len(unresolved_records(repo)),
+        "resolution_file": str(state_path(repo, "resolutions.json")),
+    }
+
+
+def command_resolve(repo: Path, record_id: str, choice: str, note: str) -> dict[str, Any]:
+    allowed = {"keep-canonical", "adopt", "combine", "defer", "obsolete", "return-to-agent"}
+    if choice not in allowed:
+        raise GovernanceError(f"Unsupported resolution choice: {choice}", EXIT_USAGE)
+    if not note.strip():
+        raise GovernanceError("A resolution note is required", EXIT_USAGE)
+    with state_lock(repo):
+        path = state_path(repo, "resolutions.json")
+        resolutions = read_json(path, {"records": []})
+        target = next((item for item in resolutions["records"] if item.get("id") == record_id), None)
+        if target is None:
+            raise GovernanceError(f"Unknown resolution ID: {record_id}", EXIT_USAGE)
+        target["choice"] = choice
+        target["note"] = note.strip()
+        # adopt/combine/return-to-agent describe work that still has to happen; they stay
+        # pending (and block closure) until reconcile observes the variant is gone.
+        status_by_choice = {
+            "keep-canonical": "resolved",
+            "defer": "deferred",
+            "obsolete": "obsolete",
+            "adopt": "pending",
+            "combine": "pending",
+            "return-to-agent": "pending",
+        }
+        target["status"] = status_by_choice[choice]
+        if target["status"] != "pending":
+            target["resolved_at"] = utc_now()
+        else:
+            target.pop("resolved_at", None)
+        target["updated_at"] = utc_now()
+        resolutions["updated_at"] = utc_now()
+        atomic_write_json(path, resolutions)
+    return {"id": record_id, "choice": choice, "status": target["status"]}
+
+
+def command_validate(repo: Path) -> dict[str, Any]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    config = load_config(repo, required=True)
+    assert config is not None
+    registry = read_json(state_path(repo, "registry.json"))
+    run = read_json(state_path(repo, "run-state.json"))
+    if registry is None:
+        errors.append("Missing worktree registry; run discover")
+    if run is None:
+        errors.append("Missing run state; run discover")
+    if registry is not None:
+        canonical = Path(registry.get("canonical_worktree", ""))
+        if not canonical.is_dir():
+            errors.append("Canonical worktree is unavailable")
+        else:
+            live_head = current_head(canonical)
+            if live_head != registry.get("canonical_head"):
+                errors.append("Canonical HEAD changed after the last inventory")
+        errors.extend(validate_generated_docs(canonical))
+        docs = canonical / "docs"
+        planning_started = (docs / "waves" / "README.md").exists()
+        specification_started = (
+            any(docs.glob("*-FSD.md")) or any(docs.glob("*-TSD.md")) or planning_started
+        )
+        if specification_started:
+            project_slug = str(config.get("project_slug") or canonical.name)
+            spec_arguments = ["--repo", str(canonical), "--project", project_slug]
+            spec_errors, spec_warnings = run_sibling_validator(
+                "spec-chain",
+                "validate_spec.py",
+                [*spec_arguments, "--mode", "governance"],
+                canonical,
+                "Specification",
+            )
+            errors.extend(spec_errors)
+            warnings.extend(spec_warnings)
+            # Backward explainability: every accepted F and T must reach a user and an outcome.
+            trace_errors, _ = run_sibling_validator(
+                "spec-chain",
+                "trace_chain.py",
+                spec_arguments,
+                canonical,
+                "Trace",
+                error_key="breaks",
+            )
+            errors.extend(trace_errors)
+        if planning_started:
+            plan_errors, plan_warnings = run_sibling_validator(
+                "plan-waves-slices",
+                "validate_plan.py",
+                ["--repo", str(canonical), "--mode", "governance"],
+                canonical,
+                "Planning",
+            )
+            errors.extend(plan_errors)
+            warnings.extend(plan_warnings)
+    unresolved = unresolved_records(repo)
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "unresolved_resolution_count": len(unresolved),
+        "unresolved_resolution_ids": [item["id"] for item in unresolved],
+    }
+
+
+def run_sibling_validator(
+    skill: str,
+    script: str,
+    arguments: list[str],
+    cwd: Path,
+    label: str,
+    *,
+    error_key: str = "errors",
+) -> tuple[list[str], list[str]]:
+    """Return (errors, warnings) from a sibling skill's validator."""
+    validator = find_skill_root().parent / skill / "scripts" / script
+    if not validator.is_file():
+        return [f"{label} validator is unavailable: {validator}"], []
+    result = run_process(
+        [sys.executable, str(validator), *arguments, "--json"],
+        cwd,
+        check=False,
+        text=True,
+    )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return [f"{label} validator returned invalid JSON"], []
+    errors = [f"{label}: {message}" for message in payload.get(error_key, [])]
+    warnings = [f"{label}: {message}" for message in payload.get("warnings", [])]
+    return errors, warnings
+
+
+def command_resume(repo: Path) -> dict[str, Any]:
+    load_config(repo, required=True)
+    run = read_json(state_path(repo, "run-state.json"))
+    if run is None:
+        raise GovernanceError("No active governance run; run discover", EXIT_VALIDATION)
+    return {
+        "run_id": run.get("run_id"),
+        "status": run.get("status"),
+        "phase": run.get("phase"),
+        "next_action": run.get("next_action"),
+        "canonical_worktree": run.get("canonical_worktree"),
+        "canonical_head": run.get("canonical_head"),
+    }
+
+
+def command_close_stage(repo: Path, approved: bool) -> dict[str, Any]:
+    if not approved:
+        raise GovernanceError("Stage closure requires explicit --owner-approved", EXIT_GATE)
+    with state_lock(repo):
+        load_config(repo, required=True)
+        fresh = inventory(repo)
+        atomic_write_json(state_path(repo, "registry.json"), fresh)
+        snapshots: dict[str, dict[str, Any]] = {}
+        for item in fresh["worktrees"]:
+            if item["dirty"]:
+                snapshots[item["path"]] = snapshot_worktree(repo, item)
+        # Rebuild from the fresh inventory so closure reflects worktrees dirtied since the
+        # last reconcile and auto-resolves pending variants that have since been cleaned.
+        build_resolutions(repo, fresh, snapshots)
+        validation = command_validate(repo)
+        blockers = list(validation["errors"])
+        if validation["unresolved_resolution_count"]:
+            blockers.append("Unresolved worktree resolution records remain")
+        if blockers:
+            raise GovernanceError("; ".join(blockers), EXIT_GATE)
+        run = read_json(state_path(repo, "run-state.json"))
+        if run is None:
+            raise GovernanceError("No active run to close", EXIT_VALIDATION)
+        run.update(
+            {
+                "status": "closed",
+                "owner_close_approved": True,
+                "closed_at": utc_now(),
+                "updated_at": utc_now(),
+                "next_action": "No active stage",
+            }
+        )
+        atomic_write_json(state_path(repo, "run-state.json"), run)
+    return {"closed": True, "run_id": run["run_id"], "canonical_head": fresh["canonical_head"]}
+
+
+def find_skill_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def merge_hook_file(path: Path, platform: str, command: str) -> None:
+    existing = read_json(path, {})
+    if not isinstance(existing, dict):
+        raise GovernanceError(f"Hook configuration must be a JSON object: {path}", EXIT_VALIDATION)
+    if platform == "cursor":
+        existing.setdefault("version", 1)
+        hooks = existing.setdefault("hooks", {})
+        specs = {
+            "sessionStart": {"command": f"{command} session-start", "timeout": 10},
+            "subagentStart": {"command": f"{command} subagent-start", "timeout": 10},
+            "subagentStop": {"command": f"{command} subagent-stop", "timeout": 10},
+            # No matcher: Cursor tool-type names are not verified, so the adapter
+            # filters on the payload (command / file path) instead.
+            "preToolUse": {
+                "command": f"{command} pre-tool-use",
+                "timeout": 10,
+                "failClosed": True,
+            },
+            "postToolUse": {
+                "command": f"{command} post-tool-use",
+                "matcher": "Write|Edit",
+                "timeout": 10,
+            },
+            "stop": {
+                "command": f"{command} stop",
+                "timeout": 10,
+                "loop_limit": 1,
+            },
+            "sessionEnd": {"command": f"{command} session-end", "timeout": 10},
+        }
+    else:
+        hooks = existing.setdefault("hooks", {})
+        specs = {
+            "SessionStart": {
+                "hooks": [{"type": "command", "command": f"{command} session-start", "timeout": 10}]
+            },
+            "SubagentStart": {
+                "hooks": [{"type": "command", "command": f"{command} subagent-start", "timeout": 10}]
+            },
+            "SubagentStop": {
+                "hooks": [{"type": "command", "command": f"{command} subagent-stop", "timeout": 10}]
+            },
+            "PreToolUse": {
+                "matcher": "Edit|Write|Bash",
+                "hooks": [{"type": "command", "command": f"{command} pre-tool-use", "timeout": 10}]
+            },
+            "PostToolUse": {
+                "matcher": "Edit|Write",
+                "hooks": [{"type": "command", "command": f"{command} post-tool-use", "timeout": 10}]
+            },
+            "Stop": {
+                "hooks": [{"type": "command", "command": f"{command} stop", "timeout": 10}]
+            },
+            "SessionEnd": {
+                "hooks": [{"type": "command", "command": f"{command} session-end", "timeout": 10}]
+            },
+        }
+    for event, spec in specs.items():
+        entries = hooks.setdefault(event, [])
+        if isinstance(entries, dict):
+            entries = [entries]
+            hooks[event] = entries
+        target = hook_entry_command(platform, spec)
+        for index, entry in enumerate(entries):
+            if isinstance(entry, dict) and hook_entry_command(platform, entry) == target:
+                # Same governance command already registered: replace it so upgraded
+                # specs never accumulate duplicates.
+                entries[index] = spec
+                break
+        else:
+            entries.append(spec)
+    atomic_write_json(path, existing, mode=0o644)
+
+
+def hook_entry_command(platform: str, entry: dict[str, Any]) -> str | None:
+    if platform == "cursor":
+        value = entry.get("command")
+        return str(value) if value else None
+    nested = entry.get("hooks")
+    if isinstance(nested, list) and nested and isinstance(nested[0], dict):
+        value = nested[0].get("command")
+        return str(value) if value else None
+    return None
+
+
+def command_install_hooks(repo: Path) -> dict[str, Any]:
+    config = load_config(repo, required=True)
+    assert config is not None
+    root = repository_root(repo)
+    skill_root = find_skill_root()
+    cursor_wrapper = root / ".cursor" / "hooks" / "governance-hook.py"
+    claude_wrapper = root / ".claude" / "hooks" / "governance-hook.py"
+    source_cursor = skill_root / "hooks" / "cursor" / "governance-hook.py"
+    source_claude = skill_root / "hooks" / "claude-code" / "governance-hook.py"
+    for source, destination in [(source_cursor, cursor_wrapper), (source_claude, claude_wrapper)]:
+        if not source.exists():
+            raise GovernanceError(f"Missing hook adapter asset: {source}", EXIT_VALIDATION)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        destination.chmod(0o755)
+    merge_hook_file(
+        root / ".cursor" / "hooks.json",
+        "cursor",
+        "python3 .cursor/hooks/governance-hook.py",
+    )
+    merge_hook_file(
+        root / ".claude" / "settings.json",
+        "claude",
+        "python3 .claude/hooks/governance-hook.py",
+    )
+    config["hooks_enabled"] = True
+    config["hooks_installed_at"] = utc_now()
+    atomic_write_json(config_path(repo), config, mode=0o644)
+    return {
+        "installed": True,
+        "cursor": str(root / ".cursor" / "hooks.json"),
+        "claude_code": str(root / ".claude" / "settings.json"),
+    }
+
+
+def neutral_hook_decision(repo: Path, event: str, payload: dict[str, Any]) -> dict[str, Any]:
+    config = load_config(repo)
+    if config is None or not config.get("enabled") or not config.get("hooks_enabled"):
+        return {"permission": "allow", "reason": "governance-disabled"}
+    if event in {"subagent-stop", "session-end"}:
+        try:
+            command_reconcile(repo)
+            return {"permission": "allow", "reason": "unfinished-work-snapshotted"}
+        except GovernanceError as exc:
+            return {"permission": "allow", "reason": f"snapshot-warning: {exc}"}
+    if event in {"session-start", "post-tool-use", "subagent-start"}:
+        try:
+            command_discover(repo)
+            return {"permission": "allow", "reason": "inventory-refreshed"}
+        except GovernanceError as exc:
+            return {"permission": "allow", "reason": f"inventory-warning: {exc}"}
+    if event == "pre-tool-use":
+        command = str(payload.get("command") or payload.get("tool_input", {}).get("command") or "")
+        destructive = re.search(
+            r"\bgit\s+(?:reset\s+--hard|clean\s+-[a-zA-Z]*f|checkout\s+--|push\s+--force|rebase|merge)\b",
+            command,
+        )
+        if destructive:
+            return {"permission": "ask", "reason": "Governance requires owner review for destructive Git operations"}
+        target = (
+            payload.get("path")
+            or payload.get("file_path")
+            or payload.get("tool_input", {}).get("path")
+            or payload.get("tool_input", {}).get("file_path")
+        )
+        if target:
+            registry = read_json(state_path(repo, "registry.json"), {"worktrees": []})
+            current = repository_root(repo)
+            try:
+                relative = str(Path(target).resolve().relative_to(current))
+            except (ValueError, OSError):
+                relative = str(target)
+            owners = [
+                item["path"]
+                for item in registry.get("worktrees", [])
+                if Path(item["path"]).resolve() != current and relative in item.get("dirty_paths", [])
+            ]
+            if owners:
+                return {
+                    "permission": "ask",
+                    "reason": f"Path is dirty in another worktree; reconcile before editing: {relative}",
+                }
+        return {"permission": "allow", "reason": "no-collision"}
+    if event == "stop":
+        return stop_decision(repo, payload)
+    return {"permission": "allow", "reason": "event-not-gated"}
+
+
+def stop_decision(repo: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    # Stop marks the end of a turn, not stage closure. Only close-stage gates; here we
+    # self-heal a stale inventory and surface concrete warnings once.
+    if payload.get("stop_hook_active"):
+        return {"permission": "allow", "reason": "governance-stop-hook-active"}
+    warnings: list[str] = []
+    try:
+        registry = read_json(state_path(repo, "registry.json"))
+        if registry is not None:
+            canonical = Path(registry.get("canonical_worktree", ""))
+            if canonical.is_dir() and current_head(canonical) != registry.get("canonical_head"):
+                command_discover(repo)
+    except GovernanceError as exc:
+        warnings.append(f"inventory refresh failed: {exc}")
+    try:
+        validation = command_validate(repo)
+    except GovernanceError as exc:
+        warnings.append(f"validation unavailable: {exc}")
+    else:
+        warnings.extend(validation["errors"])
+        if validation["unresolved_resolution_ids"]:
+            warnings.append(
+                "unresolved worktree resolutions: " + ", ".join(validation["unresolved_resolution_ids"])
+            )
+    if warnings:
+        return {"permission": "allow", "reason": "governance-warning: " + "; ".join(warnings)}
+    return {"permission": "allow", "reason": "governance-valid"}
+
+
+def command_hook(repo: Path, event: str) -> dict[str, Any]:
+    try:
+        payload = json.load(sys.stdin)
+        if not isinstance(payload, dict):
+            payload = {}
+    except json.JSONDecodeError:
+        payload = {}
+    return neutral_hook_decision(repo, event, payload)
+
+
+def render_result(value: dict[str, Any], as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(value, sort_keys=True))
+        return
+    for key, item in value.items():
+        if isinstance(item, (dict, list)):
+            print(f"{key}: {json.dumps(item, sort_keys=True)}")
+        else:
+            print(f"{key}: {item}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="governancectl")
+    parser.add_argument("--repo", default=".", help="Path to a Git worktree")
+    parser.add_argument("--json", action="store_true", help="Emit one JSON object")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for name in ["doctor", "status", "discover", "reconcile", "validate", "resume", "install-hooks"]:
+        subparsers.add_parser(name)
+    resolve_parser = subparsers.add_parser("resolve")
+    resolve_parser.add_argument("--id", required=True, dest="record_id")
+    resolve_parser.add_argument(
+        "--choice",
+        required=True,
+        choices=["keep-canonical", "adopt", "combine", "defer", "obsolete", "return-to-agent"],
+    )
+    resolve_parser.add_argument("--note", required=True)
+    close_parser = subparsers.add_parser("close-stage")
+    close_parser.add_argument("--owner-approved", action="store_true")
+    canonical_parser = subparsers.add_parser("set-canonical")
+    canonical_parser.add_argument("--path", required=True, dest="canonical_path")
+    note_parser = subparsers.add_parser("note")
+    note_parser.add_argument("--kind", required=True, choices=sorted(NOTE_KINDS))
+    note_parser.add_argument("--text", required=True)
+    note_parser.add_argument("--evidence", default=None)
+    note_parser.add_argument("--provenance", default=None, choices=PROVENANCE)
+    note_parser.add_argument("--evidence-class", default=None, choices=EVIDENCE_CLASSES, dest="evidence_class")
+    phase_parser = subparsers.add_parser("phase")
+    phase_parser.add_argument("phase", choices=PHASES)
+    phase_parser.add_argument("--next-action", default=None, dest="next_action")
+    hook_parser = subparsers.add_parser("hook")
+    hook_parser.add_argument(
+        "event",
+        choices=[
+            "session-start",
+            "subagent-start",
+            "subagent-stop",
+            "pre-tool-use",
+            "post-tool-use",
+            "stop",
+            "session-end",
+        ],
+    )
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        repo = resolve_repo(args.repo)
+        handlers = {
+            "doctor": lambda: command_doctor(repo),
+            "status": lambda: command_status(repo),
+            "discover": lambda: command_discover(repo),
+            "reconcile": lambda: command_reconcile(repo),
+            "validate": lambda: command_validate(repo),
+            "resume": lambda: command_resume(repo),
+            "install-hooks": lambda: command_install_hooks(repo),
+            "resolve": lambda: command_resolve(repo, args.record_id, args.choice, args.note),
+            "close-stage": lambda: command_close_stage(repo, args.owner_approved),
+            "set-canonical": lambda: command_set_canonical(repo, args.canonical_path),
+            "note": lambda: command_note(
+                repo, args.kind, args.text, args.evidence, args.provenance, args.evidence_class
+            ),
+            "phase": lambda: command_phase(repo, args.phase, args.next_action),
+            "hook": lambda: command_hook(repo, args.event),
+        }
+        result = handlers[args.command]()
+        render_result(result, args.json)
+        if args.command == "validate" and not result["valid"]:
+            return EXIT_VALIDATION
+        if args.command == "reconcile" and result["unresolved"]:
+            return EXIT_GATE
+        return 0
+    except GovernanceError as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc), "exit_code": exc.exit_code}, sort_keys=True))
+        else:
+            print(f"error: {exc}", file=sys.stderr)
+        return exc.exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

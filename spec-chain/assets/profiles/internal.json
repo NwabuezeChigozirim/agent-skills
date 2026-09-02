@@ -1,0 +1,11 @@
+{
+  "name": "internal",
+  "title_suffix": "Internal build document",
+  "confidentiality": "Not for issue to the client.",
+  "include_technology": true,
+  "include_source_paths": true,
+  "include_verification_register": true,
+  "page_size": "LETTER",
+  "font": "Calibri",
+  "brand_color": "1B5E3F"
+}

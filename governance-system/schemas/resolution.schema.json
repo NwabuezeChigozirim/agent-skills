@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/governance/resolution.schema.json",
+  "title": "Governance worktree resolutions",
+  "type": "object",
+  "required": ["schema_version", "repository_id", "records", "updated_at"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "repository_id": { "type": "string", "minLength": 1 },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "key",
+          "kind",
+          "worktrees",
+          "paths",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^R-[0-9]{3,}$" },
+          "key": { "type": "string", "minLength": 32 },
+          "kind": { "enum": ["overlapping-paths", "divergent-base", "unfinished-variant"] },
+          "worktrees": {
+            "type": "array",
+            "minItems": 2,
+            "items": { "type": "string" }
+          },
+          "paths": { "type": "array", "items": { "type": "string" } },
+          "snapshots": { "type": "array" },
+          "choice": {
+            "enum": [
+              "keep-canonical",
+              "adopt",
+              "combine",
+              "defer",
+              "obsolete",
+              "return-to-agent",
+              null
+            ]
+          },
+          "note": { "type": ["string", "null"] },
+          "head": { "type": ["string", "null"] },
+          "branch": { "type": ["string", "null"] },
+          "ahead": { "type": ["integer", "null"] },
+          "behind": { "type": ["integer", "null"] },
+          "status": { "enum": ["needs-owner", "pending", "resolved", "deferred", "obsolete"] }
+        }
+      }
+    },
+    "updated_at": { "type": "string" }
+  },
+  "additionalProperties": true
+}

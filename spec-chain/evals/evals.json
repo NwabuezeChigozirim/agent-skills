@@ -1,0 +1,138 @@
+{
+  "skill": "spec-chain",
+  "philosophy": "references/need-first.md",
+  "cases": [
+    {
+      "name": "governance-chain",
+      "prompt": "Use the governance Discovery Packet and decisions to write the canonical CON, FSD and TSD before wave planning.",
+      "should_trigger": true,
+      "expected": ["governance mode", "UR/UN before C", "F-ID Serves", "T-ID Realizes", "no duplicate decision log"]
+    },
+    {
+      "name": "optional-con-skip-requires-baseline",
+      "prompt": "Scope, actors, budget and product viability are already ratified in DECISIONS.md D-004 with a user-needs table. Produce the FSD and TSD.",
+      "should_trigger": true,
+      "expected": ["concept gate skipped with named baseline", "User needs baseline cites D-004", "FSD", "TSD"]
+    },
+    {
+      "name": "con-skip-refused-without-baseline",
+      "prompt": "There is a README and some Notion notes about the product. Skip the CON and write the FSD.",
+      "should_trigger": true,
+      "expected": ["refuses skip", "some documentation is not a ratified baseline", "proposes CON Part A or a ratified baseline first"]
+    },
+    {
+      "name": "headless-api",
+      "prompt": "Write an FSD and TSD for this headless payments API with scheduled settlement jobs and webhooks.",
+      "should_trigger": true,
+      "expected": ["endpoint inventory", "job inventory", "event inventory", "Serves per item", "traceability"]
+    },
+    {
+      "name": "client-edition",
+      "prompt": "Generate a client-facing Word edition from the approved behavioral specification.",
+      "should_trigger": true,
+      "expected": ["derived export", "no technology detail", "canonical Markdown unchanged"]
+    },
+    {
+      "name": "revision",
+      "prompt": "Revise the FSD after D-014 changed the approval lifecycle and show downstream TSD impact.",
+      "should_trigger": true,
+      "expected": ["stable IDs", "supersession", "traceability impact"]
+    },
+    {
+      "name": "identity-vs-need",
+      "prompt": "The product is map-first. Hirers browse equipment on a full-screen map. Write the CON. Interview notes: hirers compare specification, price, availability and distance; owners do not want exact yard coordinates shown.",
+      "should_trigger": true,
+      "expected": [
+        "map-first recorded as preference or hypothesis, not a UN",
+        "UN separates the geographic information need (practical proximity) from the map",
+        "C items evaluate distance, area, proximity sorting and map as alternative responses",
+        "map retains primary placement only if spatial exploration shows incremental value in the CNT",
+        "coordinate protection recorded under Trust and privacy"
+      ]
+    },
+    {
+      "name": "user-request-vs-underlying-job",
+      "prompt": "Users keep asking for a map. Add it to the spec. Context: they are deciding whether it is economical to mobilise a crane from a supplier's yard to their site.",
+      "should_trigger": true,
+      "expected": [
+        "Stated request recorded as evidence with class observed-behavior or stakeholder-requirement",
+        "Underlying job derived independently: judge mobilisation economics",
+        "at least two candidate responses besides a map (distance, travel time, mobilisation cost estimate)",
+        "no F item commits to a map without an accepted C passing the CNT"
+      ]
+    },
+    {
+      "name": "technology-push",
+      "prompt": "We already run websockets and a realtime message bus. Specify the booking status workflow and make it realtime.",
+      "should_trigger": true,
+      "expected": [
+        "asks what decision the user makes on a status change and how quickly",
+        "does not create realtime F items from infrastructure availability",
+        "polling or refresh accepted where it satisfies the need",
+        "any realtime behavior traces to a UN with frequency and criticality"
+      ]
+    },
+    {
+      "name": "rebuild",
+      "prompt": "Rebuild our existing hire-desk application. It has a sophisticated multi-step booking wizard, a fleet dashboard and a mature permission model. Write the CON.",
+      "should_trigger": true,
+      "expected": [
+        "existing system treated as evidence, classed observed-behavior or domain-constraint",
+        "business rules, invariants and permission semantics extracted into Part A",
+        "wizard and dashboard enter Part B only as candidate responses under the CNT",
+        "no screen or navigation carried forward as accepted without a UN"
+      ]
+    },
+    {
+      "name": "multi-role",
+      "prompt": "Specify the handover step. The equipment owner, the hirer and the haulier all take part.",
+      "should_trigger": true,
+      "expected": [
+        "three UR items with distinct environments",
+        "the whole handover workflow modelled once",
+        "UN items per role where information or decisions differ",
+        "role-specific F items rather than one generalised surface"
+      ]
+    },
+    {
+      "name": "form-before-function",
+      "prompt": "Design the availability view as an animated 3D timeline; it will look impressive to investors.",
+      "should_trigger": true,
+      "expected": [
+        "asks what the user decides from availability and how often",
+        "investor appeal recorded as preference or aesthetic-choice",
+        "Representation rationale compares against a calendar or table",
+        "recommends the simpler representation unless the richer one adds decision-relevant information"
+      ]
+    },
+    {
+      "name": "complete-core",
+      "prompt": "For the MVP drop cancellation and dispute handling; hirers can just call us. Write the FSD for booking.",
+      "should_trigger": true,
+      "expected": [
+        "identifies cancellation and dispute as part of the primary booking job and its trust requirements",
+        "rejects the narrowing or records it as an explicit O-ID with the user outcome that degrades",
+        "simplest complete solution, not smallest software",
+        "deferred behavior keeps a UN with what must remain cheap later"
+      ]
+    },
+    {
+      "name": "wave-planning-near-miss",
+      "prompt": "Break the approved specifications into waves and vertical slices.",
+      "should_trigger": false,
+      "expected": ["plan-waves-slices"]
+    },
+    {
+      "name": "governance-near-miss",
+      "prompt": "Reconcile unfinished changes across agent worktrees and prepare handoff.",
+      "should_trigger": false,
+      "expected": ["governance-system"]
+    },
+    {
+      "name": "ordinary-doc-near-miss",
+      "prompt": "Fix the spelling mistake in README.md.",
+      "should_trigger": false,
+      "expected": []
+    }
+  ]
+}

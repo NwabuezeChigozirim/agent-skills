@@ -1,0 +1,74 @@
+{
+  "skill": "governance-system",
+  "philosophy": "../spec-chain/references/need-first.md",
+  "cases": [
+    {
+      "name": "greenfield-install",
+      "prompt": "Set up governance and cold handoff for this new repository.",
+      "should_trigger": true,
+      "expected": ["install mode", "owner gates", "canonical worktree", "validation"]
+    },
+    {
+      "name": "brownfield-reconstruction",
+      "prompt": "Make this existing repo agent-ready and reconstruct the docs from code.",
+      "should_trigger": true,
+      "expected": ["discovery packet", "provenance", "owner ratification"]
+    },
+    {
+      "name": "multi-worktree-resolution",
+      "prompt": "Several agents left overlapping uncommitted files in different worktrees. Reconcile one canonical version safely.",
+      "should_trigger": true,
+      "expected": ["snapshot", "resolution records", "no automatic overwrite"]
+    },
+    {
+      "name": "resume-interrupted-run",
+      "prompt": "Resume the interrupted governance installation from its last checkpoint.",
+      "should_trigger": true,
+      "expected": ["resume mode", "rescan", "next_action"]
+    },
+    {
+      "name": "orchestrate-spec-chain",
+      "prompt": "Set up governance, produce the canonical specifications, then create the gated delivery plan.",
+      "should_trigger": true,
+      "expected": ["spec-chain", "FSD before TSD", "plan-waves-slices", "validation"]
+    },
+    {
+      "name": "rebuild",
+      "prompt": "Install governance on our ten-year-old hire-desk system and reconstruct the canonical docs from the code. It has 140 templates behind a bespoke tab navigation shell, a settlement pipeline built on scheduled jobs, and an undocumented permission matrix.",
+      "should_trigger": true,
+      "expected": [
+        "existing implementation recorded as discovery notes classed fact, observed-behavior or domain-constraint",
+        "business rules, invariants, transaction semantics and permission model extracted and kept",
+        "templates, navigation shell and architecture must re-earn their place through the CON",
+        "user reality established through spec-chain, not reconstructed from the screen inventory",
+        "no reconstructed observation becomes a D-ID without owner ratification",
+        "a CON is required because this is a substantial rebuild; the concept stage is not skipped without a ratified user-needs baseline"
+      ]
+    },
+    {
+      "name": "identity-claim-not-a-decision",
+      "prompt": "The founder says the product is map-first and wants that ratified in DECISIONS.md before discovery closes. Notes so far: hirers compare specification, price and availability; owners refuse to expose exact yard coordinates.",
+      "should_trigger": true,
+      "expected": [
+        "map-first stored as a discovery note classed preference or hypothesis",
+        "no D-ID assigned to an unratified identity claim",
+        "product identity versus user utility raised as a blocking conflict",
+        "owner decision recording the strategic reason and its cost before identity overrides utility",
+        "coordinate refusal classed stakeholder-requirement or domain-constraint, not merged with the preference",
+        "identity does not justify functionality; the map reaches spec-chain as a candidate response"
+      ]
+    },
+    {
+      "name": "planning-only-near-miss",
+      "prompt": "Break this feature into waves and vertical slices.",
+      "should_trigger": false,
+      "expected": ["plan-waves-slices"]
+    },
+    {
+      "name": "ordinary-code-change-near-miss",
+      "prompt": "Fix the null check in the user serializer.",
+      "should_trigger": false,
+      "expected": []
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "skill": "plan-waves-slices",
+  "philosophy": "../spec-chain/references/need-first.md",
+  "cases": [
+    {
+      "name": "standalone-roadmap",
+      "prompt": "Turn this roadmap into owner-gated waves and reviewable vertical slices.",
+      "should_trigger": true,
+      "expected": ["standalone mode", "waves", "slices", "gated"]
+    },
+    {
+      "name": "governance-direct-output",
+      "prompt": "Use the supplied Discovery Packet and canonical decisions to generate docs/waves directly.",
+      "should_trigger": true,
+      "expected": ["governance mode", "validated FSD/TSD", "F-ID/T-ID citations", "direct output"]
+    },
+    {
+      "name": "brownfield-delivery-order",
+      "prompt": "Plan the phased implementation order for this existing codebase.",
+      "should_trigger": true,
+      "expected": ["focused discovery", "planning blockers", "dependency order"]
+    },
+    {
+      "name": "complete-core",
+      "prompt": "Plan the waves. For the MVP make Wave 1 the booking happy path only: drop cancellation, rescheduling and dispute handling from the slices, because hirers can phone the office instead.",
+      "should_trigger": true,
+      "expected": [
+        "cancellation, rescheduling and dispute handling identified as part of the primary booking job and its trust requirements",
+        "refuses an MVP slice that removes behavior the primary job needs",
+        "Wave 1 scope is the simplest complete solution for the booking job, not the smallest amount of software",
+        "the behavior stays in the wave's in-scope list, or its removal becomes an owner decision or a retained open item naming the user outcome that degrades",
+        "anything genuinely deferred appears under Deferred naming a later wave or backlog O-ID, and the brief still cites the UN-ID its outcome serves"
+      ]
+    },
+    {
+      "name": "form-before-function",
+      "prompt": "Wave 1 should be the design system, brand palette and animated page transitions so the product feels premium in the investor demo. Put the hire request workflow in Wave 3.",
+      "should_trigger": true,
+      "expected": [
+        "waves ordered by the greatest important product uncertainty retired per unit of implementation effort",
+        "investor appeal never becomes a wave objective, a Why this wave statement or a slice Outcome; it is retained as an open item rather than ratified as a decision",
+        "design system, palette and page transitions not scheduled before workflow utility is proven",
+        "Wave 1 objective is the smallest complete workflow that validates real utility, with Why this wave naming the uncertainty it retires",
+        "visual work sequenced behind the workflow it decorates and recorded under Deferred rather than dropped silently"
+      ]
+    },
+    {
+      "name": "backend-first-decomposition-rejected",
+      "prompt": "Decompose delivery into three phases: Phase 1 the database schema and backend API, Phase 2 the React frontend, Phase 3 the design system and polish.",
+      "should_trigger": true,
+      "expected": [
+        "horizontal backend, frontend and design-system phases rejected because an end-to-end slice is possible",
+        "phases replaced with vertical slices, each naming Outcome, Serves, Why and Usable when done",
+        "any genuinely prerequisite work is Kind: infrastructure with Unlocks naming an F-ID, not a layer phase",
+        "foundation, core, wiring and smoke ordering applied only inside a vertical outcome",
+        "in governance mode, each slice serves at least one F-ID and each brief cites the UN-IDs its outcome serves"
+      ]
+    },
+    {
+      "name": "governance-install-near-miss",
+      "prompt": "Create CLAUDE.md, decisions, handoff docs and project governance.",
+      "should_trigger": false,
+      "expected": ["governance-system"]
+    },
+    {
+      "name": "implementation-near-miss",
+      "prompt": "Implement the approved Wave 2 booking endpoint.",
+      "should_trigger": false,
+      "expected": []
+    },
+    {
+      "name": "specification-near-miss",
+      "prompt": "Write the canonical FSD and TSD for this product.",
+      "should_trigger": false,
+      "expected": ["spec-chain"]
+    }
+  ]
+}
