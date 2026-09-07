@@ -176,7 +176,6 @@ class HookRegressions(unittest.TestCase):
         (self.repo / ".governance").mkdir()
         (self.repo / ".governance" / "config.json").write_text(json.dumps({"enabled": True, "hooks_enabled": True}))
 
-    @unittest.expectedFailure
     def test_gap_11_git_global_options_do_not_bypass_review(self):
         """Wave 6: classify strings only; never execute destructive probes."""
         with patch.object(gc, "load_config", return_value={"enabled": True, "hooks_enabled": True}):
@@ -184,7 +183,6 @@ class HookRegressions(unittest.TestCase):
                            for spelling in ("git reset --hard", "git -C /tmp/example reset --hard")]
         self.assertTrue(all(permission in {"ask", "deny"} for permission in permissions), permissions)
 
-    @unittest.expectedFailure
     def test_gap_12_enabled_pre_action_guard_fails_closed(self):
         """Wave 6: missing runtime cannot authorize a guarded command."""
         with patch.object(ha, "repository_root", return_value=self.repo), patch.object(ha, "runtime_path", return_value=None), patch.object(ha, "EVENT", "pre-tool-use"):

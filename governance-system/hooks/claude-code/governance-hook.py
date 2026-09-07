@@ -4,111 +4,65 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
 
 
+sys.dont_write_bytecode = True
 EVENT = sys.argv[1] if len(sys.argv) > 1 else ""
-CLAUDE_EVENT_NAMES = {
-    "session-start": "SessionStart",
-    "subagent-start": "SubagentStart",
-    "subagent-stop": "SubagentStop",
-    "pre-tool-use": "PreToolUse",
-    "post-tool-use": "PostToolUse",
-    "stop": "Stop",
-    "session-end": "SessionEnd",
-}
+# Installed wrappers load their sibling helper; source wrappers load hooks' helper.
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE if (HERE / "hook_support.py").is_file() else HERE.parent))
+try:
+    import hook_support as support
+except (ImportError, OSError, SyntaxError):
+    support = None
 
 
 def repository_root() -> Path | None:
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode == 0:
-        return Path(result.stdout.strip()).resolve()
-    installed_root = Path(__file__).resolve().parents[2]
-    if (installed_root / ".git").exists():
-        return installed_root
-    return None
+    return support.repository_root(__file__) if support else Path(__file__).resolve().parents[2]
 
 
 def runtime_path() -> Path | None:
-    override = os.environ.get("GOVERNANCECTL")
-    candidates = [
-        Path(override).expanduser() if override else None,
-        Path("~/.local/share/agent-skills/governance-system/scripts/governancectl").expanduser(),
-        Path("~/.claude/skills/governance-system/scripts/governancectl").expanduser(),
-        Path("~/.cursor/skills/governance-system/scripts/governancectl").expanduser(),
-    ]
-    return next((path.resolve() for path in candidates if path and path.is_file()), None)
+    return support.runtime_path("claude") if support else None
 
 
 def neutral_decision(payload: bytes) -> dict[str, str]:
-    root = repository_root()
-    runtime = runtime_path()
-    if root is None or runtime is None:
-        return {"permission": "allow", "reason": "governance-runtime-unavailable"}
-    result = subprocess.run(
-        [sys.executable, str(runtime), "--repo", str(root), "--json", "hook", EVENT],
-        input=payload,
-        capture_output=True,
-        check=False,
-        timeout=9,
-    )
-    if result.returncode != 0:
-        return {"permission": "allow", "reason": "governance-hook-warning"}
+    if support:
+        return support.neutral(payload, EVENT, repository_root, runtime_path)
+    # A missing helper cannot silently disable an installed pre-action guard.
     try:
-        parsed = json.loads(result.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return {"permission": "allow", "reason": "governance-hook-invalid-output"}
-    if not isinstance(parsed, dict):
-        return {"permission": "allow", "reason": "governance-hook-invalid-output"}
-    return {
-        "permission": str(parsed.get("permission", "allow")),
-        "reason": str(parsed.get("reason", "governance-check-complete")),
-    }
-
+        config = repository_root() / ".governance/config.json"
+        if not config.exists() and not config.is_symlink():
+            return {"permission": "allow", "reason": "governance-disabled"}
+        value = json.loads(config.read_text(encoding="utf-8"))
+        if (isinstance(value, dict) and not config.is_symlink() and not config.parent.is_symlink()
+                and all(type(value[k]) is bool for k in ("enabled", "hooks_enabled") if k in value)
+                and (not value.get("enabled") or not value.get("hooks_enabled"))):
+            return {"permission": "allow", "reason": "governance-disabled"}
+        parsed = json.loads(payload.decode("utf-8"))
+        if EVENT == "stop" and isinstance(parsed, dict) and parsed.get("stop_hook_active") is True:
+            return {"permission": "allow", "reason": "governance-stop-hook-active"}
+    except (OSError, ValueError, TypeError):
+        pass
+    return {"permission": "deny" if EVENT == "pre-tool-use" else "allow",
+            "reason": "governance-warning: adapter helper unavailable; repair hook installation"}
 
 def translate(decision: dict[str, str]) -> dict[str, object]:
-    permission = decision["permission"]
-    reason = decision["reason"]
-    event_name = CLAUDE_EVENT_NAMES.get(EVENT, EVENT)
-    if EVENT == "pre-tool-use":
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": event_name,
-                "permissionDecision": permission,
-            },
-            "systemMessage": reason,
-        }
-    if EVENT in {"stop", "subagent-stop"}:
-        if permission == "deny":
-            return {"decision": "block", "reason": reason}
-        if EVENT == "stop" and reason.startswith("governance-warning"):
-            # Non-blocking: Stop is a turn boundary, not stage closure.
-            return {"systemMessage": reason}
-        return {}
-    if EVENT in {"session-start", "post-tool-use"} and "warning" in reason:
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": event_name,
-                "additionalContext": reason,
-            }
-        }
+    permission, reason = decision["permission"], decision["reason"]
+    if EVENT == "pre-tool-use" and permission != "allow":
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                "permissionDecision": permission, "permissionDecisionReason": reason},
+                "systemMessage": reason}
+    # No governance objection is NOT host permission. Defer to the normal flow.
+    if "warning" in reason:
+        return {"systemMessage": reason}
     return {}
 
 
 def main() -> int:
-    payload = sys.stdin.buffer.read()
-    try:
-        decision = neutral_decision(payload)
-    except (OSError, subprocess.SubprocessError):
-        decision = {"permission": "allow", "reason": "governance-hook-warning"}
+    payload = sys.stdin.buffer.read(1024 * 1024 + 1)
+    decision = neutral_decision(payload)
     print(json.dumps(translate(decision), separators=(",", ":")))
     return 0
 

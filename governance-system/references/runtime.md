@@ -53,6 +53,9 @@ Invoke `python3 scripts/governancectl --repo PATH COMMAND`.
 
 Machine-readable commands support `--json`. Human output never includes file contents,
 patches, environment values or secret values.
+Place the global flag before the subcommand, for example `--repo PATH --json audit`.
+For extra read-only Git probes outside the runtime, use `git --no-optional-locks ...`
+to avoid index metadata refreshes from commands such as status.
 
 `doctor`, `status`, `audit`, `validate`, `check-stage`, `stage-impact`, `resume` and upgrade previews are read-only,
 including when local state is absent or config schema 2 is present. Audit validation

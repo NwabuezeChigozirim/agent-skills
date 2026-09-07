@@ -3,6 +3,24 @@
   "philosophy": "../spec-chain/references/need-first.md",
   "cases": [
     {
+      "name": "legacy-audit-no-write",
+      "prompt": "Audit this existing repository with schema-2 governance before handoff. Tell me whether it is ready, but do not change it.",
+      "should_trigger": true,
+      "expected": ["read-only audit, not discover or reconcile", "legacy metadata retained without migration", "extra Git probes suppress optional index writes", "missing acceptance evidence is not readiness", "no source, config, runtime-state or index metadata changes"]
+    },
+    {
+      "name": "enabled-hook-runtime-unavailable",
+      "prompt": "An opted-in governance pre-tool hook blocked my edit because its runtime is unavailable. Resume safely.",
+      "should_trigger": true,
+      "expected": ["inspect activation, runtime selection and installation", "do not disable the guard or retry the blocked action through another tool", "repair only with applicable authorization", "passive Stop remains non-blocking", "no claimed owner exception from a chat message"]
+    },
+    {
+      "name": "changed-agreement-before-handoff",
+      "prompt": "The current stage passed yesterday, but implementation revealed that one frozen input is wrong. Finish the handoff.",
+      "should_trigger": true,
+      "expected": ["inspect current stage and evidence", "read-only impact review", "surface the changed assumption to its owning authority", "no manufactured approval or stale check reuse", "explicit revision or reopening only after actual owner approval"]
+    },
+    {
       "name": "greenfield-install",
       "prompt": "Set up governance and cold handoff for this new repository.",
       "should_trigger": true,

@@ -48,6 +48,9 @@ class SuiteValidatorTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "agent-skills"
         (self.root / "governance-system" / "scripts").mkdir(parents=True)
         (self.root / "governance-system" / "scripts" / "engineering_policy.py").write_text("# Synthetic policy selector\n")
+        (self.root / "governance-system" / "scripts" / "hook_policy.py").write_text("# Synthetic hook policy\n")
+        (self.root / "governance-system" / "hooks").mkdir()
+        (self.root / "governance-system" / "hooks" / "hook_support.py").write_text("# Synthetic hook support\n")
         for package, filename in (("governance-system", "artifact_contracts.py"), ("governance-system", "stage_contracts.py"), ("governance-system", "change_impact.py"), ("spec-chain", "specification_graph.py"), ("plan-waves-slices", "planning_graph.py")):
             (self.root / package / "scripts").mkdir(parents=True, exist_ok=True)
             (self.root / package / "scripts" / filename).write_text("# Synthetic graph contract\n")
@@ -106,6 +109,12 @@ class SuiteValidatorTests(unittest.TestCase):
         (self.root / "governance-system" / "scripts" / "engineering_policy.py").unlink()
         errors = self.expect_invalid()
         self.assertTrue(any("engineering_policy.py" in error for error in errors), errors)
+
+    def test_missing_hook_modules_fail(self) -> None:
+        for relative in ("scripts/hook_policy.py", "hooks/hook_support.py"):
+            (self.root / "governance-system" / relative).unlink()
+            errors = self.expect_invalid()
+            self.assertTrue(any(relative in error for error in errors), errors)
 
     def test_missing_graph_contract_modules_fail(self) -> None:
         for package, filename in (("governance-system", "artifact_contracts.py"), ("governance-system", "stage_contracts.py"), ("governance-system", "change_impact.py"), ("spec-chain", "specification_graph.py"), ("plan-waves-slices", "planning_graph.py")):

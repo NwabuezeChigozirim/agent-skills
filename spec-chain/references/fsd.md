@@ -115,17 +115,67 @@ duplicate-run behavior and operator-visible failure.
 Business trigger, recipient/system behavior, failure visibility, retry expectation and
 degraded behavior. Provider, transport and adapter design belong to the TSD.
 
-## Roles
+## Roles and capability coverage — required in every FSD
+
+The reader must be able to answer “who uses this system, and what can each of them
+do?” without reconstructing the answer from individual specifications. Include
+`## Role-capability matrix` near the front, even for a single-role or headless system.
+This is the product's role-based functional overview, not merely a login/permissions
+table or a commitment to a technical role-based access-control implementation.
+
+- Take the complete UR inventory from the accepted CON or ratified FSD baseline.
+  Column headings identify each UR-ID and its readable role name. Include guests,
+  operators, integration callers and automated actors when they actually exist in
+  that baseline; do not invent an administrator or login requirement by convention.
+- Use columns `F-ID`, `Feature / action`, then one column per role. Each row cites one
+  defined F-ID and names a distinct observable action or received outcome. Split
+  “manage bookings” into the specified create, view, change, cancel or approve actions
+  where their behavior or permissions differ. Several rows may cite the same F-ID.
+  Every specified F-ID, including jobs and journeys, must be represented.
+- Every role/action cell states `Allowed — explanation`, `Conditional — condition`,
+  `Denied — restriction`, or `Not applicable — reason`. Conditions identify relevant
+  ownership, tenant, lifecycle, delegation or other domain boundaries. No blank cells,
+  ticks, “all access” shorthand or implied administrator inheritance. Draft uncertainty
+  is `Unresolved — O-ID and question`; it blocks handoff, not silently becomes access.
+- A role with no current system action still appears, with a sourced scope explanation
+  in its cells. A background outcome names who receives it or the accepted automated
+  actor; lack of a screen is not grounds to omit it. Deferred/out-of-scope capabilities
+  remain explicitly identified in the scope baseline, never displayed as delivered.
+- Group rows by product area in multiple tables if useful; repeat all role columns.
+  Shared actions need not become duplicate F specifications just because several roles
+  can perform them. This matrix summarizes the existing functional inventory and
+  `Actors and permission`, `Actions and outcomes` and `Rules`; it does not create a
+  competing permission authority. Resolve contradictions before handoff.
+
+For example, with these roles and behaviors already accepted:
+
+| F-ID | Feature / action | UR-001 — Requester | UR-002 — Reviewer |
+|---|---|---|---|
+| F-001 | Submit a request | Conditional — submit for own account | Denied — reviewing does not grant submission |
+| F-001 | View a request | Conditional — own requests only | Conditional — assigned requests only |
+| F-002 | Approve a request | Denied — cannot approve own submission | Conditional — assigned and awaiting review |
+
+Review every detailed action against the matrix and every matrix entry against its
+F specification. Include permitted and denied/conditional examples in acceptance
+where access affects the outcome. A role, action or rule change updates both views
+and prompts downstream test/design impact review; newly discovered authority gaps
+return upstream as O-IDs. Preserve stable UR/F identifiers.
+
+The validator checks mandatory presence, table shape, known UR/F IDs, complete role
+and F coverage, distinct action rows and explicit cell dispositions. It cannot prove
+that discovery found every real-world role, that prose lists every action, or that a
+stated permission agrees semantically with the specification. Those are review duties.
 
 Where roles sharing a workflow need different information or controls, specify separate
-items per role rather than one generalised surface. Cite the UR through the UN.
+items where the behavior differs rather than one generalised surface. Cite the UR
+through the UN; do not duplicate an identical behavior solely for matrix layout.
 
 ## Document structure
 
 1. Document control, authority and chain register.
 2. User needs baseline (only when the CON was skipped).
 3. Scope baseline, changes, exclusions and deferred behavior.
-4. Actors, roles and permission matrix.
+4. Required role-capability matrix: all users/actors, features/actions and conditions.
 5. Domain vocabulary and behavioral lifecycles.
 6. Complete functional inventory.
 7. Full item specifications grouped by product area.
@@ -158,7 +208,8 @@ inside the FSD.
 
 The client edition is derived from the canonical FSD:
 
-- preserve actors, needs, capabilities, rules, journeys, acceptance, dependencies and
+- preserve the complete role-capability matrix (readable role/action names and
+  conditions), actors, needs, capabilities, rules, journeys, acceptance, dependencies and
   client open decisions;
 - remove internal requirement metadata that adds no client value;
 - remove all technology, provider, source path and implementation detail;

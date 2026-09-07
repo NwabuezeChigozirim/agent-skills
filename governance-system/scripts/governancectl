@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import engineering_policy as policy  # noqa: E402
 import stage_contracts as stages  # noqa: E402
 import change_impact as impact  # noqa: E402
+import hook_policy  # noqa: E402
 
 
 SCHEMA_VERSION = 3
@@ -1746,8 +1747,7 @@ def merge_hook_file(path: Path, platform: str, command: str) -> None:
             "sessionStart": {"command": f"{command} session-start", "timeout": 10},
             "subagentStart": {"command": f"{command} subagent-start", "timeout": 10},
             "subagentStop": {"command": f"{command} subagent-stop", "timeout": 10},
-            # No matcher: Cursor tool-type names are not verified, so the adapter
-            # filters on the payload (command / file path) instead.
+            # No matcher: inspect command/path fields across generic tool names.
             "preToolUse": {
                 "command": f"{command} pre-tool-use",
                 "timeout": 10,
@@ -1755,7 +1755,6 @@ def merge_hook_file(path: Path, platform: str, command: str) -> None:
             },
             "postToolUse": {
                 "command": f"{command} post-tool-use",
-                "matcher": "Write|Edit",
                 "timeout": 10,
             },
             "stop": {
@@ -1778,7 +1777,7 @@ def merge_hook_file(path: Path, platform: str, command: str) -> None:
                 "hooks": [{"type": "command", "command": f"{command} subagent-stop", "timeout": 10}]
             },
             "PreToolUse": {
-                "matcher": "Edit|Write|Bash",
+                "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
                 "hooks": [{"type": "command", "command": f"{command} pre-tool-use", "timeout": 10}]
             },
             "PostToolUse": {
@@ -1829,9 +1828,14 @@ def command_install_hooks(repo: Path) -> dict[str, Any]:
     claude_wrapper = root / ".claude" / "hooks" / "governance-hook.py"
     source_cursor = skill_root / "hooks" / "cursor" / "governance-hook.py"
     source_claude = skill_root / "hooks" / "claude-code" / "governance-hook.py"
-    for source, destination in [(source_cursor, cursor_wrapper), (source_claude, claude_wrapper)]:
+    support = skill_root / "hooks" / "hook_support.py"
+    copies = [(source_cursor, cursor_wrapper), (source_claude, claude_wrapper),
+              (support, cursor_wrapper.with_name("hook_support.py")),
+              (support, claude_wrapper.with_name("hook_support.py"))]
+    for source, destination in copies:
         if not source.exists():
             raise GovernanceError(f"Missing hook adapter asset: {source}", EXIT_VALIDATION)
+    for source, destination in copies:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         destination.chmod(0o755)
@@ -1859,6 +1863,11 @@ def neutral_hook_decision(repo: Path, event: str, payload: dict[str, Any]) -> di
     config = load_config(repo)
     if config is None or not config.get("enabled") or not config.get("hooks_enabled"):
         return {"permission": "allow", "reason": "governance-disabled"}
+    try:
+        hook_policy.validate_payload(payload)
+    except ValueError:
+        return {"permission": "deny" if event == "pre-tool-use" else "allow",
+                "reason": "governance-warning: malformed hook payload; retry with a valid action"}
     if event in {"subagent-stop", "session-end"}:
         try:
             result = command_reconcile(repo)
@@ -1874,26 +1883,24 @@ def neutral_hook_decision(repo: Path, event: str, payload: dict[str, Any]) -> di
         except GovernanceError as exc:
             return {"permission": "allow", "reason": f"inventory-warning: {exc}"}
     if event == "pre-tool-use":
-        command = str(payload.get("command") or payload.get("tool_input", {}).get("command") or "")
-        destructive = re.search(
-            r"\bgit\s+(?:reset\s+--hard|clean\s+-[a-zA-Z]*f|checkout\s+--|push\s+--force|rebase|merge)\b",
-            command,
-        )
-        if destructive:
-            return {"permission": "ask", "reason": "Governance requires owner review for destructive Git operations"}
-        target = (
-            payload.get("path")
-            or payload.get("file_path")
-            or payload.get("tool_input", {}).get("path")
-            or payload.get("tool_input", {}).get("file_path")
-        )
+        command, target = hook_policy.action(payload)
+        if command and hook_policy.command_requires_review(command):
+            return {"permission": "ask", "reason": "Governance requires owner review for destructive or unclassified Git/shell operations"}
         if target:
-            registry = read_json(state_path(repo, "registry.json"), {"worktrees": []})
             current = repository_root(repo)
             try:
-                relative = str(Path(target).resolve().relative_to(current))
+                base = Path(payload.get("cwd") or current)
+                if not base.is_absolute():
+                    base = current / base
+                base.resolve().relative_to(current)
+                relative = str((base / target).resolve().relative_to(current))
             except (ValueError, OSError):
-                relative = str(target)
+                return {"permission": "ask", "reason": "Edit target is outside this governed worktree; review its ownership"}
+            # Stored inventory is continuity, not proof of current ownership.
+            registry = inventory(repo)
+            if any(item.get("availability") != "available" or not item.get("content_verifiable", True)
+                   for item in registry["worktrees"]):
+                return {"permission": "deny", "reason": "governance-warning: worktree ownership is unavailable; restore access before editing"}
             owners = [
                 item["path"]
                 for item in registry.get("worktrees", [])
@@ -1941,11 +1948,12 @@ def stop_decision(repo: Path, payload: dict[str, Any]) -> dict[str, Any]:
 
 def command_hook(repo: Path, event: str) -> dict[str, Any]:
     try:
-        payload = json.load(sys.stdin)
-        if not isinstance(payload, dict):
-            payload = {}
-    except json.JSONDecodeError:
-        payload = {}
+        raw = sys.stdin.read(hook_policy.MAX_PAYLOAD + 1)
+        if len(raw.encode("utf-8")) > hook_policy.MAX_PAYLOAD:
+            raise ValueError("oversize")
+        payload = {} if not raw.strip() and event != "pre-tool-use" else json.loads(raw)
+    except (ValueError, UnicodeError):
+        payload = None
     return neutral_hook_decision(repo, event, payload)
 
 

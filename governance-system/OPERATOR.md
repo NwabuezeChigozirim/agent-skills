@@ -98,6 +98,13 @@ configuration; re-running it replaces the governance entries instead of duplicat
 them. Hooks activate only when `.governance/config.json` enables them. The Stop hook
 warns and never blocks; only `close-stage` gates.
 
+Enabled pre-action failures deny until repaired. Reinstallation refreshes the shared
+adapter helper as well as each wrapper. `GOVERNANCECTL`, when set, must name the intended
+runtime; a stale override does not fall back to another installation. Cursor generic
+pre-tool review requests deny visibly because that event does not enforce `ask`.
+No-objection responses leave the host's normal permission checks intact. Read
+[hook policy](references/hooks.md) for supported commands, ownership checks and limits.
+
 ## Specification chain
 
 Governance delegates canonical specifications to `spec-chain` after worktree

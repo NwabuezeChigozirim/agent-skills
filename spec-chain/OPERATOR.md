@@ -33,7 +33,16 @@ python3 scripts/trace_chain.py   --repo /path/to/repository --project project-sl
 python3 scripts/trace_chain.py   --repo /path/to/repository --project project-slug --id T-004
 ```
 
-Validation is structural and deterministic: fixed item schemas, known IDs, `Serves`
+Every FSD requires a role-capability matrix, including single-role and headless
+systems. See [FSD roles and coverage](references/fsd.md#roles-and-capability-coverage--required-in-every-fsd)
+for its schema and review duties. This owner-requested completeness check applies
+under both policies: older FSDs without the matrix now report a validation error.
+Validation does not rewrite them or change project policy. Add the matrix from
+accepted UR/F definitions during an authorized revision; do not invent missing
+permissions or retroactively claim old acceptance satisfies this new check.
+
+Validation is structural and deterministic: complete role/F matrix coverage and
+explicit action dispositions, fixed item schemas, known IDs, `Serves`
 citing only accepted C, representation rationale on pages/screens/journeys, CON
 structure, UN coverage, F/T traceability, decision references, blocking O-IDs, WHAT/HOW
 boundaries, RK-ID use, source dates, `Product deltas surfaced`, and duplicate decision

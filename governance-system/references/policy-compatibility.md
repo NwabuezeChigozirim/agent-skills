@@ -41,7 +41,20 @@ graph coverage is reported; only a newly approved freeze/revision gains a baseli
 `stage-impact` is read-only; revision/reopening never waives check, recovery or release
 gates. See [controlled iteration](controlled-iteration.md).
 
+Wave 6 hardens the opted-in hook surface under policy 1 as a safety correction, not
+automatic policy-2 adoption. Enabled pre-action failures deny, live edit ownership is
+checked, and host-specific review translation preserves normal permissions. Ordinary
+legacy runs without hooks/contracts retain their opt-in boundaries. Hook hardening
+and local test success do not release policy 2; see [hook policy](hooks.md) for limits.
+
 ## Selection
+
+An explicit post-Wave-6 owner requirement makes the FSD role-capability matrix a
+mandatory authoring/validation check under both policies. Existing FSDs without it
+now fail specification validation until revised with authorization; their historical
+acceptance, contents and policy marker are not rewritten. This is a deliberate
+completeness-rule change, not policy-2 activation. See
+[FSD coverage](../../spec-chain/references/fsd.md#roles-and-capability-coverage--required-in-every-fsd).
 
 - A project's `.governance/config.json` is authoritative when present.
 - Without that config, standalone documents declare `policy_version` in frontmatter.

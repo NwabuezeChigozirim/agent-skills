@@ -31,6 +31,9 @@ def configured_identity() -> tuple[str, str]:
 _NAME, _EMAIL = configured_identity()
 AUTHOR_ENV = {
     **os.environ,
+    # Installed hook fixtures must use this checkout, not a developer's global
+    # installation (which is absent on clean CI hosts).
+    "GOVERNANCECTL": str(RUNTIME),
     "GIT_AUTHOR_NAME": _NAME,
     "GIT_AUTHOR_EMAIL": _EMAIL,
     "GIT_COMMITTER_NAME": _NAME,
@@ -131,6 +134,10 @@ authority: behavior
 ---
 # Sample Functional Specification
 {baseline}
+## Role-capability matrix
+| F-ID | Feature / action | UR-001 — Owner |
+|---|---|---|
+| F-001 | Create an attributable item | Conditional — owner creates with valid details; others are denied |
 ## Functional inventory
 | F-ID | Kind | Name |
 |---|---|---|
@@ -486,7 +493,8 @@ class GovernanceRuntimeTests(unittest.TestCase):
             self.repo,
             input_text=json.dumps({"command": "git reset --hard HEAD"}),
         )
-        self.assertEqual(json.loads(cursor.stdout)["permission"], "ask")
+        # Cursor preToolUse accepts ask syntactically but does not enforce it.
+        self.assertEqual(json.loads(cursor.stdout)["permission"], "deny")
 
         claude_hook = self.repo / ".claude" / "hooks" / "governance-hook.py"
         claude = run(

@@ -24,7 +24,7 @@
       "name": "headless-api",
       "prompt": "Write an FSD and TSD for this headless payments API with scheduled settlement jobs and webhooks.",
       "should_trigger": true,
-      "expected": ["endpoint inventory", "job inventory", "event inventory", "Serves per item", "traceability"]
+      "expected": ["endpoint inventory", "job inventory", "event inventory", "Serves per item", "traceability", "required role-capability matrix includes accepted callers, operators and automated actors without inventing a UI"]
     },
     {
       "name": "client-edition",
@@ -36,7 +36,7 @@
       "name": "revision",
       "prompt": "Revise the FSD after D-014 changed the approval lifecycle and show downstream TSD impact.",
       "should_trigger": true,
-      "expected": ["stable IDs", "supersession", "traceability impact"]
+      "expected": ["stable IDs", "supersession", "traceability impact", "role-capability matrix and affected action conditions revised together with detailed requirements"]
     },
     {
       "name": "identity-vs-need",
@@ -91,7 +91,9 @@
         "three UR items with distinct environments",
         "the whole handover workflow modelled once",
         "UN items per role where information or decisions differ",
-        "role-specific F items rather than one generalised surface"
+        "role-specific F items where behavior differs, without duplicating shared behavior",
+        "role-capability matrix covers each accepted actor and distinct handover action, linked to F-IDs",
+        "unknown action permissions become blocking O-IDs rather than invented access"
       ]
     },
     {

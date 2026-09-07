@@ -520,6 +520,69 @@ def validate_f_items(
     return served_needs
 
 
+def validate_role_matrix(text: str, model: NeedModel, path: Path, errors: list[str]) -> None:
+    """Check the readable coverage view, not the truth of free-text permissions.
+
+    The matrix references existing UR/F definitions; it creates no new authority.
+    Comments and fenced examples cannot satisfy this required view, on either policy.
+    """
+    visible = ac.visible(text)
+    body = section_body(visible, "Role-capability matrix")
+    rows = ac.rows(body)
+    if not body or not rows:
+        errors.append(f"{path.name}: missing or empty Role-capability matrix")
+        return
+    if len(re.findall(r"^##\s+(?:\d+(?:\.\d+)*\.?\s+)?Role-capability matrix\s*$",
+                      visible, re.MULTILINE | re.IGNORECASE)) != 1:
+        errors.append(f"{path.name}: duplicate Role-capability matrix sections; use one authoritative view")
+    known_f = {identifier for identifier, _ in requirement_sections(visible, F_HEADING)}
+    known_roles = set(model.users)
+    covered_f: set[str] = set()
+    actions: set[tuple[str, str]] = set()
+    for row in rows:
+        cells, fields = row["cells"], row["fields"]
+        headers = list(fields)
+        prefix = f"{path.name}: role matrix row {row['line']}"
+        if headers[:2] != ["f-id", "feature / action"] or len(headers) < 3 or len(cells) != len(headers):
+            errors.append(f"{prefix}: expected F-ID, Feature / action and one named column per UR, with a cell in every column")
+            continue
+        roles = []
+        for heading in headers[2:]:
+            match = re.fullmatch(r"(UR-\d{3,})\s+[—–-]\s+(.+)", heading, re.IGNORECASE)
+            if not match or not ac.meaningful(match[2]):
+                errors.append(f"{prefix}: role column must name 'UR-ID — Role': {heading}")
+            else:
+                roles.append(match[1].upper())
+        if len(roles) != len(set(roles)):
+            errors.append(f"{prefix}: duplicate UR columns")
+        missing, unknown = sorted(known_roles - set(roles)), sorted(set(roles) - known_roles)
+        if missing:
+            errors.append(f"{prefix}: missing roles: {', '.join(missing)}")
+        if unknown:
+            errors.append(f"{prefix}: unknown roles: {', '.join(unknown)}")
+        f_id, action = cells[:2]
+        if f_id not in known_f:
+            errors.append(f"{prefix}: unknown or invalid F-ID: {f_id}")
+        else:
+            covered_f.add(f_id)
+        if not ac.meaningful(action):
+            errors.append(f"{prefix}: Feature / action must name an observable action or outcome")
+        key = (f_id, " ".join(action.casefold().split()))
+        if key in actions:
+            errors.append(f"{prefix}: duplicate feature/action row for {f_id}: {action}")
+        actions.add(key)
+        for heading, cell in zip(headers[2:], cells[2:]):
+            disposition = re.fullmatch(r"(Allowed|Conditional|Denied|Not applicable|Unresolved)\s+[—–-]\s+(.+)",
+                                       cell, re.IGNORECASE)
+            if not disposition or not ac.meaningful(disposition[2]):
+                errors.append(f"{prefix}, {heading}: use an explicit disposition and explanation; no blank or implicit access")
+            elif disposition[1].casefold() == "unresolved":
+                errors.append(f"{prefix}, {heading}: unresolved role/action authority blocks handoff; resolve the canonical O-ID")
+    missing_f = sorted(known_f - covered_f)
+    if missing_f:
+        errors.append(f"{path.name}: F-IDs missing role matrix actions: {', '.join(missing_f)}")
+
+
 def validate_traceability(
     fsd_text: str,
     tsd_text: str,
@@ -635,6 +698,7 @@ def validate_repository(repo: Path, project: str, mode: str, requested_policy: s
         validate_blocking_section(fsd_text, fsd_path, errors)
         validate_verification(fsd_text, fsd_path, errors)
         model = validate_fsd_baseline(fsd_text, fsd_path, con_model, errors, warnings)
+        validate_role_matrix(fsd_text, model, fsd_path, errors)
         f_sections = requirement_sections(fsd_text, F_HEADING)
         served = validate_f_items(f_sections, model, fsd_path, errors, warnings)
         # Every accepted response must be realized by at least one F; the FSD is where an

@@ -46,11 +46,19 @@ project: <project-slug>
 - Out: <behavior and reason>
 - Deferred: <behavior and enabling constraint>
 
-## Actors and permissions
+## Role-capability matrix
 
-| Actor | UR-ID | Capability | Allowed behavior | Denied behavior |
-|---|---|---|---|---|
-| <actor> | UR-001 | <capability> | <behavior> | hidden and server-rejected |
+<!-- Authoring guidance: required even for one role or a headless system. Add one named UR column per
+accepted actor and one row per distinct action or received outcome. Cover every
+F-ID. Repeat an F-ID for separate actions; do not group different permissions under
+“manage”. Cells use Allowed, Conditional, Denied, Not applicable or Unresolved,
+followed by an em dash and an explanation. Unresolved O-IDs block handoff.
+Keep these summaries consistent with the detailed functional specifications. -->
+
+| F-ID | Feature / action | UR-001 — <Role> |
+|---|---|---|
+| F-001 | <Feature and distinct action> | Conditional — <scope and condition from F-001> |
+| F-002 | <Journey action or received outcome> | Allowed — <behavior from F-002> |
 
 ## Domain vocabulary
 

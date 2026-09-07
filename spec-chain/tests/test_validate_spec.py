@@ -70,6 +70,105 @@ class SpecValidatorTests(unittest.TestCase):
         self.assertEqual(payload["accepted_response_ids"], ["C-001"])
         self.assertEqual(payload["warnings"], [])
 
+    # --- role/action completeness ------------------------------------------------
+
+    def test_role_matrix_is_required_not_an_example_or_optional_section(self) -> None:
+        matrix = "## Role-capability matrix\n| F-ID | Feature / action | UR-001 — Hirer |\n|---|---|---|\n| F-001 | View distance | Allowed — broad area only |\n"
+        for omitted in ("", "## Role-capability matrix\n", matrix.split("| F-001")[0],
+                        "```markdown\n" + matrix + "```\n", "<!--\n" + matrix + "-->\n"):
+            with self.subTest(matrix=omitted):
+                self.write_chain(functional=fsd(matrix=omitted))
+                result = self.validate()
+                self.assertEqual(result.returncode, 3, result.stdout)
+                self.assertTrue(any("missing or empty Role-capability matrix" in e for e in self.errors(result)))
+
+    def test_multi_role_matrix_covers_distinct_actions_with_explicit_boundaries(self) -> None:
+        reviewer = """### UR-002 — Reviewer
+- **Description:** reviews submitted requests
+- **Environment:** office
+- **Expertise:** experienced
+- **Evidence class:** stakeholder-requirement
+"""
+        matrix = """## 4. Role-capability matrix
+| F-ID | Feature / action | UR-001 — Hirer | UR-002 — Reviewer |
+|---|---|---|---|
+| F-001 | View distance | Allowed — distance and broad area only | Conditional — assigned request only |
+| F-001 | Receive shortlist confirmation | Conditional — own request only | Not applicable — no recipient role in this workflow |
+| F-001 | Change shortlist | Conditional — own draft only | Denied — reviewing grants no edit authority |
+"""
+        self.write_chain(concept=con().replace("## User needs", reviewer + "## User needs"), functional=fsd(matrix=matrix))
+        result = self.validate()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(json.loads(result.stdout)["user_ids"], ["UR-001", "UR-002"])
+
+    def test_matrix_rejects_missing_unknown_or_duplicate_roles(self) -> None:
+        for heading, expected in (("UR-999 — Unknown", "unknown roles"),
+                                  ("UR-001 — Hirer | UR-001 — Duplicate", "duplicate UR columns"),
+                                  ("UR-001 — Hirer | UR-001 — Hirer", "cell in every column"),
+                                  ("Hirer", "role column must name")):
+            matrix = f"## Role-capability matrix\n| F-ID | Feature / action | {heading} |\n|---|---|---|"
+            if "|" in heading:
+                matrix += "---|"
+            matrix += "\n| F-001 | View distance | Allowed — distance only |"
+            if "|" in heading:
+                matrix += " Allowed — distance only |"
+            self.write_chain(functional=fsd(matrix=matrix + "\n"))
+            errors = self.errors(self.validate())
+            self.assertTrue(any(expected in e for e in errors), errors)
+        # An omitted accepted actor cannot disappear just because no row mentions it.
+        self.write_chain(concept=con().replace("## User needs", "### UR-002 — Observer\n"
+                         "- **Description:** observes\n- **Environment:** office\n- **Expertise:** experienced\n"
+                         "- **Evidence class:** stakeholder-requirement\n## User needs"))
+        self.assertTrue(any("missing roles: UR-002" in e for e in self.errors(self.validate())))
+
+    def test_matrix_must_cover_all_f_items_and_cannot_invent_features(self) -> None:
+        matrix = "## Role-capability matrix\n| F-ID | Feature / action | UR-001 — Hirer |\n|---|---|---|\n| F-001 | View distance | Allowed — broad area only |\n"
+        self.write_chain(functional=fsd(items=f_item() + f_item("F-002"), inventory_ids=["F-001", "F-002"], matrix=matrix),
+                         technical=tsd(realizes="F-001, F-002", trace="| F-001 | UN-001 | T-001 | tests |\n| F-002 | UN-001 | T-001 | tests |"))
+        self.assertIn("sample-FSD.md: F-IDs missing role matrix actions: F-002", self.errors(self.validate()))
+        self.write_chain(functional=fsd(matrix=matrix.replace("| F-001 |", "| F-999 |")))
+        self.assertTrue(any("unknown or invalid F-ID: F-999" in e for e in self.errors(self.validate())))
+
+    def test_matrix_blank_implicit_or_unresolved_permissions_block_handoff(self) -> None:
+        header = "## Role-capability matrix\n| F-ID | Feature / action | UR-001 — Hirer |\n|---|---|---|\n"
+        for cell in ("", "✓", "all access", "Allowed", "Conditional —", "Denied — TBD", "Not applicable", "Unresolved — O-001: who may view?"):
+            with self.subTest(cell=cell):
+                self.write_chain(functional=fsd(matrix=header + f"| F-001 | View distance | {cell} |\n"))
+                errors = self.errors(self.validate())
+                self.assertTrue(any("explicit disposition" in e or "unresolved role/action authority" in e for e in errors), errors)
+
+    def test_matrix_rejects_blank_duplicate_actions_and_malformed_rows(self) -> None:
+        header = "## Role-capability matrix\n| F-ID | Feature / action | UR-001 — Hirer |\n|---|---|---|\n"
+        row = "| F-001 | View distance | Allowed — broad area only |\n"
+        for rows, expected in ((row + row, "duplicate feature/action"),
+                               (row.replace("View distance", ""), "must name an observable action"),
+                               ("| F-001 | View distance |\n", "cell in every column"),
+                               (row.replace("only |", "only | excess |"), "cell in every column")):
+            self.write_chain(functional=fsd(matrix=header + rows))
+            self.assertTrue(any(expected in e for e in self.errors(self.validate())))
+
+    def test_matrix_supports_grouped_tables_but_not_duplicate_sections(self) -> None:
+        header = "| F-ID | Feature / action | UR-001 — Hirer |\n|---|---|---|\n"
+        matrix = "## Role-capability matrix\n### Proximity\n" + header + "| F-001 | View distance | Allowed — broad area only |\n"
+        matrix += "\n### Shortlisting\n" + header + "| F-001 | Receive shortlist | Conditional — own request only |\n"
+        self.write_chain(functional=fsd(matrix=matrix))
+        self.assertEqual(self.validate().returncode, 0)
+        self.write_chain(functional=fsd(matrix=matrix + matrix))
+        self.assertTrue(any("duplicate Role-capability matrix" in e for e in self.errors(self.validate())))
+
+    def test_matrix_check_applies_to_standalone_and_current_preview_without_writes(self) -> None:
+        self.write_chain(functional=fsd(matrix=""))
+        (self.repo / "DECISIONS.md").rename(self.repo / "docs/sample-DECISIONS.md")
+        before = {str(p): (p.read_bytes(), p.stat().st_mtime_ns) for p in self.repo.rglob("*") if p.is_file()}
+        for policy in ("legacy", "current"):
+            result = self.run_script(VALIDATOR, "--mode", "standalone", "--policy", policy)
+            payload = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 3)
+            self.assertFalse(payload["artifact_valid"])
+            self.assertTrue(any("Role-capability matrix" in e for e in payload["errors"]))
+        after = {str(p): (p.read_bytes(), p.stat().st_mtime_ns) for p in self.repo.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+
     def test_missing_fixed_label_fails(self) -> None:
         labels = [
             "Kind", "Purpose", "Serves", "Actors and permission", "Context/trigger", "Inputs/content",

@@ -121,11 +121,15 @@ def fsd(
     baseline: str = "",
     trace: str | None = None,
     extra: str = "",
+    matrix: str | None = None,
 ) -> str:
     """`trace=None` omits the optional FSD traceability table; `trace=""` renders it empty."""
     items = items if items is not None else f_item()
     inventory_ids = inventory_ids or ["F-001"]
     rows = "\n".join(f"| {fid} | endpoint | item |" for fid in inventory_ids)
+    if matrix is None:
+        matrix = "## Role-capability matrix\n| F-ID | Feature / action | UR-001 — Hirer |\n|---|---|---|\n"
+        matrix += "\n".join(f"| {fid} | View supply proximity | Allowed — distance and broad area only |" for fid in inventory_ids) + "\n"
     traceability = (
         ""
         if trace is None
@@ -138,6 +142,7 @@ authority: behavior
 ---
 # Sample Functional Specification
 {baseline}
+{matrix}
 ## Functional inventory
 | F-ID | Kind | Name |
 |---|---|---|

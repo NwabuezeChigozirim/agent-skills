@@ -127,7 +127,8 @@ Use prose for reasoning, trade-offs, and anything where the argument matters mor
 
 Use bullets for lists of independent facts, and bold the lead-in when each bullet is a term plus its explanation.
 
-Never use a table for a single item, and never let a table carry an argument — a reader skims tables.
+Avoid a table for a single item unless it is a required completeness view, such as
+the FSD role-capability matrix. Never let a table carry an argument — a reader skims tables.
 
 ---
 

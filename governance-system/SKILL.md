@@ -27,6 +27,9 @@ Python's standard library and Git. Read [references/runtime.md](references/runti
 for command and exit-code contracts.
 
 For audit requests, run `audit` and report; do not enter the mutating workflow below.
+For additional audit Git probes, use `git --no-optional-locks ...`: ordinary `git status`
+can refresh index metadata even when no source file changes. Put `--json` before the
+subcommand when requesting runtime JSON.
 For upgrades, preview with `upgrade --dry-run` and apply only with explicit project
 authorization. Read [references/policy-compatibility.md](references/policy-compatibility.md)
 for policy selection, release gates and metadata-only migration.
@@ -160,6 +163,9 @@ Run `install-hooks` only when the owner requested hooks or accepted governance
 installation. Preserve unrelated Cursor and Claude Code hook configuration.
 Hooks are no-ops unless `.governance/config.json` enables them. The Stop hook only
 warns; it never blocks a turn. Closure is gated by `close-stage` alone.
+Enabled pre-action failures deny until repaired. Cursor review requests block visibly
+because its generic pre-tool event does not enforce `ask`; do not retry through the
+guard or treat an owner chat message as a machine-readable exception.
 
 Read [references/hooks.md](references/hooks.md) before installation.
 

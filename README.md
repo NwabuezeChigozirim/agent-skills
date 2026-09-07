@@ -74,17 +74,17 @@ python3 scripts/check.py
 python3 scripts/check.py --python-only
 ```
 
-The baseline contains 105 Python tests and 4 renderer tests. Waves 1–5 add policy,
-migration, no-write, content-bound recovery, graph, stage-contract and revision tests. Two explicitly expected-failing
-regression cases remain for later waves. Expected failures are outstanding defects, not passed checks;
-unexpected successes fail the run so their allowances must be reviewed and removed.
+The baseline contains 105 Python tests and 4 renderer tests. Waves 1–6 add policy,
+migration, no-write, content-bound recovery, graph, stage-contract, revision and hook
+guard tests. All 12 original regression cases now pass without expected-failure
+allowances. Deterministic checks are distinct from behavioral and native-host evidence.
 The Python suites and validators use only the standard library and Git. Renderer tests
 also require `npm ci --prefix spec-chain`, LibreOffice and Poppler (`pdftoppm`).
 
 The GitHub workflow runs Python checks on Linux/macOS and renderer checks on Linux;
 host-specific symlink checks remain an explicit local installation check.
 
-## Reliability evolution: Waves 1–5
+## Reliability evolution: Waves 1–6
 
 `governancectl audit` and `upgrade --dry-run` are read-only, including for schema-2
 configs. Migration is explicit. Policy 1 retains legacy engineering gates, with recovery
@@ -120,14 +120,20 @@ Changed assumptions can re-enter their owning activity; explicit reopening prese
 historical acceptance while requiring fresh checks. Reports never rewrite specifications
 or plans, silently retire obligations, or reuse old evidence. See
 [controlled iteration](governance-system/references/controlled-iteration.md) and the
-[Wave 5 implementation record](docs/evolution/wave-5.md). Wave 6 remains owner-gated;
-policy 2 is still unreleased.
+[Wave 5 implementation record](docs/evolution/wave-5.md).
+
+Wave 6 hardens opted-in pre-action hooks: bounded command classification, fresh edit
+ownership, failure denial and host-specific permission translation. It also adds
+independent behavioral checks and removes the installed-hook tests' dependency on a
+developer's global runtime. See [hook policy](governance-system/references/hooks.md) and
+the [Wave 6 implementation and release assessment](docs/evolution/wave-6.md).
+Policy 2 remains unreleased; local implementation completion is not release approval.
 
 ## Validators
 
 | Script | Checks |
 |---|---|
-| `spec-chain/scripts/validate_spec.py` | CON/FSD/TSD structure, schemas, evidence-class enum, response status, representation rationale, inventory and traceability symmetry. Reports warnings on a separate channel so a structural smell never fails a build |
+| `spec-chain/scripts/validate_spec.py` | CON/FSD/TSD structure, required role-capability matrix coverage, schemas, evidence-class enum, response status, representation rationale, inventory and traceability symmetry. Reports non-blocking evidence warnings separately |
 | `spec-chain/scripts/trace_chain.py` | Walks the backward-explainability invariant and exits non-zero when a chain to a user breaks |
 | `plan-waves-slices/scripts/validate_plan.py` | Slice sections and labels, each slice serving an `F` or carrying an infrastructure `Unlocks`, each brief citing a known user need |
 | `governance-system/scripts/validate_suite.py` | Package structure, references resolve, the philosophy file exists, each eval file's philosophy pointer resolves |
@@ -137,3 +143,9 @@ Validators are deterministic and structural. Semantic anti-patterns — identity
 justifying functionality, technology looking for a use case, form before function,
 "MVP" that deletes the core job — are covered by the behavioral eval suites in each
 package's `evals/`.
+
+Every FSD must show all accepted user roles and each feature's distinct actions in a
+[role-capability matrix](spec-chain/references/fsd.md#roles-and-capability-coverage--required-in-every-fsd),
+including access conditions and F-ID links. This explicit post-Wave-6 requirement
+applies to both policies; older FSDs missing the matrix require an authorized revision
+before passing specification validation. No automatic migration or policy change occurs.

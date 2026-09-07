@@ -112,7 +112,11 @@ accepted decisions.
 ### 5. Write the canonical FSD
 
 Read [references/fsd.md](references/fsd.md). The FSD answers what the system must enable
-the user to accomplish. Every item has a stable F-ID, a `Serves` label citing the UN
+the user to accomplish. Every FSD includes a role-capability matrix showing all
+accepted users/actors and every feature's distinct actions, with access conditions
+and F-ID links. Include single-role and headless systems; never invent roles or
+permissions to fill the matrix. Keep it consistent with the detailed behavior when
+revising requirements. Every item has a stable F-ID, a `Serves` label citing the UN
 and accepted C it realizes, and one demonstrable “done when.” Material user
 interactions separate the functional requirement from the representation and give a
 representation rationale. Do not include topology, frameworks, storage design, source
@@ -152,9 +156,10 @@ python3 scripts/validate_spec.py --repo <repository> --project <slug> --mode <go
 python3 scripts/trace_chain.py --repo <repository> --project <slug>
 ```
 
-The validator enforces structure: known IDs, required labels, accepted-only `Serves`
-references, representation rationale where the interaction is material, and complete
-traceability. `trace_chain.py` walks every accepted F and T backward to a user and an
+The validator enforces structure: role/action matrix coverage, known IDs, required
+labels, accepted-only `Serves` references, representation rationale where the
+interaction is material, and complete traceability. `trace_chain.py` walks every
+accepted F and T backward to a user and an
 outcome; a break is an unjustified assumption. Warnings mark accepted responses that
 rest on assumptions or preferences. Repair errors before handing the chain to
 `plan-waves-slices`.
