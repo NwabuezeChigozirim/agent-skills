@@ -7,6 +7,14 @@ import argparse
 import json
 from pathlib import Path
 import re
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "governance-system" / "scripts"))
+import engineering_policy as policy  # noqa: E402
+import artifact_contracts as ac  # noqa: E402
+import planning_graph as pg  # noqa: E402
 
 
 DECISION_ID = re.compile(r"\bD-\d{3,}\b")
@@ -134,9 +142,10 @@ def validate_slices(
             )
 
 
-def validate_governance(repo: Path) -> tuple[list[str], list[str]]:
+def validate_governance(repo: Path, *, current: bool = False) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
+    functional_pattern = re.compile(r"\bF-(?:NFR-)?\d{3,}\b") if current else FUNCTIONAL_ID
     waves_dir = repo / "docs" / "waves"
     index = waves_dir / "README.md"
     checklist = waves_dir / "PR-CHECKLIST.md"
@@ -153,7 +162,7 @@ def validate_governance(repo: Path) -> tuple[list[str], list[str]]:
     if len(tsd_files) != 1:
         errors.append(f"Expected exactly one canonical TSD; found {len(tsd_files)}")
     known_functional = (
-        set(FUNCTIONAL_ID.findall(fsd_files[0].read_text(encoding="utf-8", errors="replace")))
+        set(functional_pattern.findall(fsd_files[0].read_text(encoding="utf-8", errors="replace")))
         if len(fsd_files) == 1
         else set()
     )
@@ -164,6 +173,8 @@ def validate_governance(repo: Path) -> tuple[list[str], list[str]]:
     )
     needs = known_needs(repo)
     index_text = index.read_text(encoding="utf-8", errors="replace")
+    if current:
+        index_text = ac.visible(index_text)
     if LEGEND not in index_text:
         errors.append("Wave index is missing the fixed status legend")
     errors.extend(placeholder_errors(index, repo, index_text))
@@ -177,13 +188,15 @@ def validate_governance(repo: Path) -> tuple[list[str], list[str]]:
     known_decisions = decision_ids(decisions)
     for brief in briefs:
         text = brief.read_text(encoding="utf-8", errors="replace")
+        if current:
+            text = ac.visible(text)
         count = len(EXIT_HEADING.findall(text))
         if count != 1:
             errors.append(f"{brief.relative_to(repo)} has {count} exit-criterion sections; expected 1")
         missing = sorted(set(DECISION_ID.findall(text)) - known_decisions)
         if missing:
             errors.append(f"{brief.relative_to(repo)} cites unknown decisions: {', '.join(missing)}")
-        cited_functional = set(FUNCTIONAL_ID.findall(text))
+        cited_functional = set(functional_pattern.findall(text))
         cited_technical = set(TECHNICAL_ID.findall(text))
         cited_needs = set(NEED_ID.findall(text))
         if not cited_functional:
@@ -205,7 +218,8 @@ def validate_governance(repo: Path) -> tuple[list[str], list[str]]:
             )
         if unknown_needs:
             errors.append(f"{brief.relative_to(repo)} cites unknown user needs: {', '.join(unknown_needs)}")
-        validate_slices(brief, repo, text, known_functional, errors, warnings)
+        if not current:
+            validate_slices(brief, repo, text, known_functional, errors, warnings)
         errors.extend(placeholder_errors(brief, repo, text))
     duplicate_status = []
     for path in [repo / "AGENTS.md", repo / "CLAUDE.md", repo / "Implementations.md", repo / "README.md"]:
@@ -216,7 +230,7 @@ def validate_governance(repo: Path) -> tuple[list[str], list[str]]:
     return errors, warnings
 
 
-def validate_standalone(repo: Path, plan_name: str) -> tuple[list[str], list[str]]:
+def validate_standalone(repo: Path, plan_name: str, *, current: bool = False) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     decisions = repo / "docs" / f"{plan_name}-DECISIONS.md"
@@ -227,6 +241,8 @@ def validate_standalone(repo: Path, plan_name: str) -> tuple[list[str], list[str
             errors.append(f"Missing {path.relative_to(repo)}")
     if waves.is_file():
         text = waves.read_text(encoding="utf-8", errors="replace")
+        if current:
+            text = ac.visible(text)
         if LEGEND not in text:
             errors.append("Standalone waves document is missing the fixed status legend")
         wave_count = len(WAVE_HEADING.findall(text))
@@ -249,16 +265,32 @@ def main() -> int:
     parser.add_argument("--mode", choices=["standalone", "governance"], required=True)
     parser.add_argument("--plan-name")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--policy", choices=["auto", "legacy", "current"], default="auto")
     args = parser.parse_args()
     repo = Path(args.repo).expanduser().resolve()
     if args.mode == "standalone" and not args.plan_name:
         parser.error("--plan-name is required in standalone mode")
-    errors, warnings = (
-        validate_governance(repo)
-        if args.mode == "governance"
-        else validate_standalone(repo, args.plan_name)
+    documents = (
+        [repo / "docs" / f"{args.plan_name}-WAVES.md"]
+        if args.mode == "standalone" else sorted((repo / "docs" / "waves").glob("*.md"))
     )
-    result = {"valid": not errors, "errors": errors, "warnings": warnings}
+    policy_result = policy.evaluate_policy(repo, documents, args.policy)
+    current = policy_result["policy_version"] == policy.CURRENT_POLICY
+    errors, warnings = (
+        validate_governance(repo, current=current)
+        if args.mode == "governance"
+        else validate_standalone(repo, args.plan_name, current=current)
+    )
+    errors.extend(policy_result["policy_errors"])
+    graph = pg.build_graph(repo, args.mode, args.plan_name) if policy_result["policy_version"] == policy.CURRENT_POLICY else None
+    graph_errors = ac.messages(graph) if graph is not None else []
+    graph_warnings = ac.messages(graph, "warning") if graph is not None else []
+    errors.extend(graph_errors)
+    warnings.extend(graph_warnings)
+    result = {**policy_result, "valid": not errors, "errors": errors, "warnings": warnings,
+              "artifact_valid": not any(error not in policy_result["policy_errors"] for error in errors),
+              "graph": graph, "graph_errors": graph_errors, "graph_warnings": graph_warnings,
+              "graph_valid": not graph_errors if graph is not None else None}
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:

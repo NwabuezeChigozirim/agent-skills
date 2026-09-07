@@ -12,7 +12,15 @@ import argparse
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Any
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "governance-system" / "scripts"))
+import engineering_policy as policy  # noqa: E402
+import artifact_contracts as ac  # noqa: E402
+import specification_graph as sg  # noqa: E402
 
 
 # Em dash is the house style; en dash and hyphen are accepted so a typo does not make
@@ -373,7 +381,7 @@ def validate_need_items(model: NeedModel, path: Path, errors: list[str], warning
             errors.append(f"{path.name}: {need_id} 'Roles' cites no UR-ID")
 
 
-def validate_responses(model: NeedModel, text: str, path: Path, errors: list[str], warnings: list[str]) -> None:
+def validate_responses(model: NeedModel, text: str, path: Path, errors: list[str], warnings: list[str], *, report_weak_evidence: bool = True) -> None:
     validate_requirement_labels(list(model.responses.items()), C_LABELS, path, errors)
     for response_id, body in model.responses.items():
         kind = (label_value(body, "Kind") or "").strip().strip("`").lower()
@@ -393,7 +401,7 @@ def validate_responses(model: NeedModel, text: str, path: Path, errors: list[str
         if unknown:
             errors.append(f"{path.name}: {response_id} serves unknown needs: {', '.join(unknown)}")
         evidence = validate_evidence_class(response_id, body, path, errors)
-        if status == "accepted" and evidence in WEAK_EVIDENCE:
+        if report_weak_evidence and status == "accepted" and evidence in WEAK_EVIDENCE:
             warnings.append(
                 f"{path.name}: accepted response {response_id} rests on evidence class '{evidence}'; "
                 "validate or record the tradeoff as a decision"
@@ -411,7 +419,7 @@ def validate_responses(model: NeedModel, text: str, path: Path, errors: list[str
         )
 
 
-def validate_con(text: str, path: Path, errors: list[str], warnings: list[str]) -> NeedModel:
+def validate_con(text: str, path: Path, errors: list[str], warnings: list[str], *, report_weak_evidence: bool = True) -> NeedModel:
     validate_frontmatter(text, "CON", path, errors)
     present = headings(text)
     for title in CON_REQUIRED_SECTIONS:
@@ -423,7 +431,7 @@ def validate_con(text: str, path: Path, errors: list[str], warnings: list[str]) 
     if not model.needs:
         errors.append(f"{path.name}: no UN items found")
     validate_need_items(model, path, errors, warnings)
-    validate_responses(model, text, path, errors, warnings)
+    validate_responses(model, text, path, errors, warnings, report_weak_evidence=report_weak_evidence)
     inventory = table_ids(section_body(text, "Response inventory"), "C")
     if inventory and inventory != set(model.responses):
         missing_specs = sorted(inventory - set(model.responses))
@@ -584,13 +592,15 @@ def validate_traceability(
 # --- entry point ---------------------------------------------------------------------
 
 
-def validate_repository(repo: Path, project: str, mode: str) -> dict[str, object]:
+def validate_repository(repo: Path, project: str, mode: str, requested_policy: str = "auto") -> dict[str, object]:
     errors: list[str] = []
     warnings: list[str] = []
     docs = repo / "docs"
     fsd_path = docs / f"{project}-FSD.md"
     tsd_path = docs / f"{project}-TSD.md"
     con_path = docs / f"{project}-CON.md"
+    policy_result = policy.evaluate_policy(repo, [con_path, fsd_path, tsd_path], requested_policy)
+    errors.extend(policy_result["policy_errors"])
     decisions_path = repo / "DECISIONS.md" if mode == "governance" else docs / f"{project}-DECISIONS.md"
     if mode == "governance" and (docs / f"{project}-DECISIONS.md").exists():
         errors.append(
@@ -601,10 +611,18 @@ def validate_repository(repo: Path, project: str, mode: str) -> dict[str, object
     tsd_text = read(tsd_path, errors)
     decisions_text = read(decisions_path, errors)
     con_text = con_path.read_text(encoding="utf-8", errors="replace") if con_path.is_file() else ""
+    current = policy_result["policy_version"] == policy.CURRENT_POLICY
+    graph = None
+    if current:
+        graph = sg.build_graph(con_text, fsd_text, tsd_text, decisions_text,
+                              {"con": str(con_path), "fsd": str(fsd_path), "tsd": str(tsd_path), "decisions": str(decisions_path)})
+        con_text, fsd_text, tsd_text = (ac.visible(text) for text in (con_text, fsd_text, tsd_text))
+        errors.extend(ac.messages(graph))
+        warnings.extend(ac.messages(graph, "warning"))
 
     con_model: NeedModel | None = None
     if con_text:
-        con_model = validate_con(con_text, con_path, errors, warnings)
+        con_model = validate_con(con_text, con_path, errors, warnings, report_weak_evidence=not current)
 
     model = NeedModel()
     f_ids: set[str] = set()
@@ -624,6 +642,10 @@ def validate_repository(repo: Path, project: str, mode: str) -> dict[str, object
         served_responses: set[str] = set()
         for _f_id, body in f_sections:
             served_responses |= set(ANY_C.findall(label_value(body, "Serves") or ""))
+        if graph is not None:
+            for node in graph["nodes"]:
+                if node["type"] == "F-NFR":
+                    served_responses |= ac.ids(node["fields"].get("serves", ""), "C")
         unrealized = sorted(model.accepted_responses - served_responses)
         if unrealized:
             errors.append(
@@ -642,7 +664,15 @@ def validate_repository(repo: Path, project: str, mode: str) -> dict[str, object
         if not section_body(tsd_text, "Product deltas surfaced"):
             errors.append(f"{tsd_path.name}: missing Product deltas surfaced section (state 'None' when empty)")
     if fsd_text and tsd_text:
-        f_ids, t_ids = validate_traceability(fsd_text, tsd_text, fsd_path, tsd_path, errors)
+        if current:
+            f_sections = requirement_sections(fsd_text, F_HEADING)
+            t_sections = requirement_sections(tsd_text, T_HEADING)
+            validate_requirement_labels(f_sections, F_LABELS, fsd_path, errors)
+            validate_requirement_labels(t_sections, T_LABELS, tsd_path, errors)
+            f_ids = {item[0] for item in f_sections}
+            t_ids = {item[0] for item in t_sections}
+        else:
+            f_ids, t_ids = validate_traceability(fsd_text, tsd_text, fsd_path, tsd_path, errors)
 
     specs = [(fsd_path, fsd_text), (tsd_path, tsd_text)]
     if con_text:
@@ -656,9 +686,16 @@ def validate_repository(repo: Path, project: str, mode: str) -> dict[str, object
             validate_placeholders(text, path, errors)
 
     return {
+        **policy_result,
         "valid": not errors,
+        "artifact_valid": not any(error not in policy_result["policy_errors"] for error in errors),
         "errors": errors,
         "warnings": warnings,
+        "graph": graph,
+        "graph_errors": ac.messages(graph) if graph is not None else [],
+        "graph_warnings": ac.messages(graph, "warning") if graph is not None else [],
+        "graph_valid": not ac.messages(graph) if graph is not None else None,
+        "nonfunctional_ids": sorted(node["id"] for node in graph["nodes"] if node["type"] == "F-NFR") if graph else [],
         "project": project,
         "mode": mode,
         "con": str(con_path) if con_path.is_file() else None,
@@ -681,9 +718,10 @@ def main() -> int:
     parser.add_argument("--project", required=True)
     parser.add_argument("--mode", choices=["governance", "standalone"], required=True)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--policy", choices=["auto", "legacy", "current"], default="auto")
     args = parser.parse_args()
     repo = Path(args.repo).expanduser().resolve()
-    result = validate_repository(repo, args.project, args.mode)
+    result = validate_repository(repo, args.project, args.mode, args.policy)
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:

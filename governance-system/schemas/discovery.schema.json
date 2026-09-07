@@ -36,7 +36,8 @@
           "path": { "type": "string" },
           "branch": { "type": "string" },
           "head": { "type": "string" },
-          "dirty": { "type": "boolean" },
+          "dirty": { "type": ["boolean", "null"] },
+          "availability": { "enum": ["available", "unavailable"] },
           "dirty_paths": { "type": "array", "items": { "type": "string" } }
         }
       }
@@ -72,7 +73,19 @@
             "aesthetic-choice"
           ]
         },
-        "created_at": { "type": "string" }
+        "created_at": { "type": "string" },
+        "resolved_at": { "type": "string" },
+        "resolution": {
+          "type": "object",
+          "required": ["decision", "decision_sha256", "rationale", "owner_approved"],
+          "properties": {
+            "decision": { "type": "string", "pattern": "^D-[0-9]{3,}$" },
+            "decision_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "rationale": { "type": "string", "minLength": 1 },
+            "owner_approved": { "const": true }
+          }
+        },
+        "resolution_history": { "type": "array", "items": { "type": "object" } }
       }
     }
   },

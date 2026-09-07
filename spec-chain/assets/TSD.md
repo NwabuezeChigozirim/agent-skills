@@ -1,5 +1,6 @@
 ---
 document_type: TSD
+policy_version: 1
 authority: technical-design
 status: draft
 project: <project-slug>

@@ -50,7 +50,8 @@ evals, so the discipline survives contact with an agent in a hurry.
 ## Install
 
 The three packages must stay siblings — `governancectl` locates the spec-chain and plan
-validators relative to its own resolved path.
+validators relative to its own resolved path. All command-line tools share the
+read-only engineering-policy selector shipped in the governance package.
 
 ```bash
 git clone https://github.com/NwabuezeChigozirim/agent-skills.git
@@ -68,15 +69,51 @@ cd spec-chain && npm ci
 ## Verify
 
 ```bash
-for skill in spec-chain plan-waves-slices governance-system; do
-  (cd "$skill" && python3 -m unittest discover -s tests)
-done
-python3 governance-system/scripts/validate_suite.py --check-symlinks
-(cd spec-chain && npm test)
+python3 scripts/check.py
+# Without renderer prerequisites:
+python3 scripts/check.py --python-only
 ```
 
-105 Python tests and 4 renderer tests. The Python suites and the validators use only the
-standard library and Git.
+The baseline contains 105 Python tests and 4 renderer tests. Waves 1–4 add policy,
+migration, no-write, content-bound recovery, graph and stage-contract tests. Two explicitly expected-failing
+regression cases remain for later waves. Expected failures are outstanding defects, not passed checks;
+unexpected successes fail the run so their allowances must be reviewed and removed.
+The Python suites and validators use only the standard library and Git. Renderer tests
+also require `npm ci --prefix spec-chain`, LibreOffice and Poppler (`pdftoppm`).
+
+The GitHub workflow runs Python checks on Linux/macOS and renderer checks on Linux;
+host-specific symlink checks remain an explicit local installation check.
+
+## Reliability evolution: Waves 1–4
+
+`governancectl audit` and `upgrade --dry-run` are read-only, including for schema-2
+configs. Migration is explicit. Policy 1 retains legacy engineering gates, with recovery
+safety fixes; policy 2 is not yet
+released and cannot be partially activated. New configs/templates remain explicitly
+on policy 1 until the program's release gate. See
+[policy compatibility](governance-system/references/policy-compatibility.md).
+The [Wave 1 implementation record](docs/evolution/wave-1.md) tracks its scope,
+verification and the next approval gate.
+
+Wave 2 makes snapshots immutable and dispositions content-bound. It preserves staged
+and working states separately, retains base commits locally, and gates closure on
+unknown content or incomplete recovery without an owner-attested backup. Earlier
+snapshots and owner choices remain intact. See the
+[recovery contract](governance-system/references/recovery.md) and
+[Wave 2 implementation record](docs/evolution/wave-2.md).
+
+Wave 3 adds read-only policy-2 specification and planning graph previews: definitions
+instead of prose mentions, exact realization edges, first-class NFRs, wave/slice
+membership, dependencies and recorded approval references. Legacy checks retain their
+behavior and policy 2 remains unreleased. See the
+[Wave 3 implementation record](docs/evolution/wave-3.md).
+
+Wave 4 adds explicit per-run stage contracts: frozen inputs and acceptance checks,
+content-bound execution receipts, blocking-intent resolution and owner sign-off bound
+to verified content. Default legacy closure remains unchanged; opted-in runs cannot
+cancel their way back to legacy acceptance. Policy 2 remains unreleased. See the
+[stage contract](governance-system/references/stage-contracts.md) and
+[Wave 4 implementation record](docs/evolution/wave-4.md). Wave 5 remains owner-gated.
 
 ## Validators
 

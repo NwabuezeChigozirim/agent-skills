@@ -1,5 +1,6 @@
 ---
 document_type: CON
+policy_version: 1
 authority: concept
 status: draft
 project: <project-slug>

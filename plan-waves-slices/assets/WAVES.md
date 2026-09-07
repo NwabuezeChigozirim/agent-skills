@@ -1,3 +1,7 @@
+---
+policy_version: 1
+---
+
 # <Plan Name> Delivery Plan
 
 Standalone-mode output. Governance mode writes directly to `docs/waves/`.

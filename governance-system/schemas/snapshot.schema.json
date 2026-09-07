@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/governance/snapshot.schema.json",
+  "title": "Immutable local recovery snapshot, format 2",
+  "type": "object",
+  "required": ["schema_version", "snapshot_format", "snapshot_id", "content_fingerprint", "manifest_fingerprint", "capture_limit_bytes", "worktree", "head", "base_ref", "dirty_paths", "files", "index_entries", "index_objects", "tracked_patch", "working_archive", "untracked_archive", "index_archive", "patch_status", "coverage", "payloads", "created_at"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "snapshot_format": { "const": 2 },
+    "snapshot_id": { "type": "string", "pattern": "^v2-[0-9a-f]{10}-[0-9a-f]{64}$" },
+    "content_fingerprint": { "$ref": "#/$defs/digest" },
+    "manifest_fingerprint": { "$ref": "#/$defs/digest" },
+    "capture_limit_bytes": { "type": "integer", "minimum": 1 },
+    "worktree": { "type": "string", "minLength": 1 },
+    "head": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "base_ref": { "type": "string", "pattern": "^refs/governance/snapshots/[0-9a-f]{40,64}$" },
+    "dirty_paths": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "files": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object", "required": ["kind"],
+        "properties": {
+          "kind": { "enum": ["file", "symlink", "deleted", "unreadable", "unsupported"] },
+          "mode": { "type": "integer", "minimum": 0 },
+          "size": { "type": "integer", "minimum": 0 },
+          "sha256": { "$ref": "#/$defs/digest" }
+        }
+      }
+    },
+    "index_entries": {
+      "type": "array", "items": {
+        "type": "object", "required": ["path", "mode", "oid", "stage"],
+        "properties": {
+          "path": { "type": "string" },
+          "mode": { "type": "string", "pattern": "^[0-7]{6}$" },
+          "oid": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+          "stage": { "type": "integer", "minimum": 0, "maximum": 3 }
+        }
+      }
+    },
+    "index_objects": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" } },
+    "tracked_patch": { "type": "string" },
+    "working_archive": { "type": "string" },
+    "untracked_archive": { "type": "string" },
+    "index_archive": { "type": "string" },
+    "patch_status": { "enum": ["included", "omitted-incomplete-capture", "omitted-size-limit", "omitted-diff-unavailable"] },
+    "coverage": {
+      "type": "object", "required": ["status", "gaps"],
+      "properties": {
+        "status": { "enum": ["complete", "incomplete"] },
+        "gaps": { "type": "array", "items": {
+          "type": "object", "required": ["path", "reason"],
+          "properties": { "path": { "type": "string" }, "reason": { "type": "string" } }
+        } }
+      }
+    },
+    "payloads": {
+      "type": "object", "minProperties": 4, "maxProperties": 4,
+      "additionalProperties": {
+        "type": "object", "required": ["sha256", "size"],
+        "properties": { "sha256": { "$ref": "#/$defs/digest" }, "size": { "type": "integer", "minimum": 0 } }
+      }
+    },
+    "created_at": { "type": "string" }
+  },
+  "$defs": { "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" } },
+  "additionalProperties": true
+}

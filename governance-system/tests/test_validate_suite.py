@@ -46,6 +46,11 @@ class SuiteValidatorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="suite-validator-")
         self.root = Path(self.temp.name) / "agent-skills"
+        (self.root / "governance-system" / "scripts").mkdir(parents=True)
+        (self.root / "governance-system" / "scripts" / "engineering_policy.py").write_text("# Synthetic policy selector\n")
+        for package, filename in (("governance-system", "artifact_contracts.py"), ("governance-system", "stage_contracts.py"), ("spec-chain", "specification_graph.py"), ("plan-waves-slices", "planning_graph.py")):
+            (self.root / package / "scripts").mkdir(parents=True, exist_ok=True)
+            (self.root / package / "scripts" / filename).write_text("# Synthetic graph contract\n")
         for name in SKILLS:
             skill = self.root / name
             for directory in ["references", "assets", "evals"]:
@@ -96,6 +101,17 @@ class SuiteValidatorTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertTrue(payload["valid"])
         self.assertEqual(payload["errors"], [])
+
+    def test_missing_shared_policy_selector_fails(self) -> None:
+        (self.root / "governance-system" / "scripts" / "engineering_policy.py").unlink()
+        errors = self.expect_invalid()
+        self.assertTrue(any("engineering_policy.py" in error for error in errors), errors)
+
+    def test_missing_graph_contract_modules_fail(self) -> None:
+        for package, filename in (("governance-system", "artifact_contracts.py"), ("governance-system", "stage_contracts.py"), ("spec-chain", "specification_graph.py"), ("plan-waves-slices", "planning_graph.py")):
+            (self.root / package / "scripts" / filename).unlink()
+            errors = self.expect_invalid()
+            self.assertTrue(any(filename in error for error in errors), errors)
 
     # --- the philosophy file ----------------------------------------------------
 

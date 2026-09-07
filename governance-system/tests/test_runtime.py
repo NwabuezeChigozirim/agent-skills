@@ -279,7 +279,9 @@ def write_governance_docs(repo: Path, *, concept: bool = False) -> None:
 class GovernanceRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="governance-runtime-")
-        self.repo = Path(self.temp.name) / "repo"
+        # macOS temporary roots may pass through /var -> /private/var. Git reports
+        # canonical paths, so fixtures use the same identity on both supported OSes.
+        self.repo = (Path(self.temp.name) / "repo").resolve()
         self.repo.mkdir()
         run(["git", "init", "-q"], self.repo)
         (self.repo / "app.txt").write_text("base\n", encoding="utf-8")
@@ -303,7 +305,7 @@ class GovernanceRuntimeTests(unittest.TestCase):
         run(["git", "commit", "-q", "-m", message], repo)
 
     def add_sibling(self, name: str = "agent-worktree", branch: str = "agent") -> Path:
-        sibling = Path(self.temp.name) / name
+        sibling = (Path(self.temp.name) / name).resolve()
         run(["git", "branch", branch], self.repo)
         run(["git", "worktree", "add", "-q", str(sibling), branch], self.repo)
         return sibling
@@ -354,6 +356,8 @@ class GovernanceRuntimeTests(unittest.TestCase):
         self.assertIn(".env", sibling_manifest["untracked_excluded_sensitive"])
         self.assertNotIn(".env", sibling_manifest["untracked_included"])
 
+        backup = Path(self.temp.name) / "owner-recovery.enc"
+        backup.write_bytes(b"Owner-managed recovery for the excluded secret fixture")
         for record in self.resolutions():
             ctl(
                 self.repo,
@@ -364,6 +368,7 @@ class GovernanceRuntimeTests(unittest.TestCase):
                 "keep-canonical",
                 "--note",
                 "Fixture owner selected canonical content after snapshot review.",
+                *(["--recovery-ref", str(backup)] if record["kind"] == "incomplete-recovery" else []),
             )
         validate = json.loads(ctl(self.repo, "validate").stdout)
         self.assertTrue(validate["valid"])
@@ -527,7 +532,7 @@ class GovernanceRuntimeTests(unittest.TestCase):
         canonical = json.loads((self.common_state(clone) / "canonical.json").read_text(encoding="utf-8"))
         self.assertEqual(Path(canonical["canonical_worktree"]).resolve(), clone.resolve())
 
-    def test_legacy_v2_config_is_migrated_in_place(self) -> None:
+    def test_legacy_v2_config_requires_explicit_metadata_upgrade(self) -> None:
         legacy = {
             "schema_version": 2,
             "suite_version": "2.0.0",
@@ -542,9 +547,17 @@ class GovernanceRuntimeTests(unittest.TestCase):
         (self.repo / ".governance").mkdir()
         (self.repo / ".governance" / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
         doctor = json.loads(ctl(self.repo, "doctor").stdout)
-        self.assertEqual(doctor["config_schema"], 3)
+        # Reading is no longer authorization to migrate. This replaces the old
+        # assertion that doctor silently rewrote schema 2.
+        self.assertEqual(doctor["config_schema"], 2)
+        self.assertEqual(json.loads((self.repo / ".governance" / "config.json").read_text()), legacy)
+        self.assertFalse(self.common_state().exists())
+        applied = json.loads(ctl(self.repo, "upgrade", "--apply", "--policy", "legacy").stdout)
+        self.assertTrue(applied["changed"])
         migrated = json.loads((self.repo / ".governance" / "config.json").read_text(encoding="utf-8"))
         self.assertEqual(migrated["project_slug"], "custom-slug")
+        self.assertEqual(migrated["schema_version"], 3)
+        self.assertEqual(migrated["policy_version"], 1)
         self.assertNotIn("canonical_worktree", migrated)
         self.assertEqual(Path(doctor["canonical_worktree"]).resolve(), self.repo.resolve())
 

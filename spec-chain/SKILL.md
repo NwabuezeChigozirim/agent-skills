@@ -132,6 +132,14 @@ O-ID, RK-ID or named verification task.
 
 ### 8. Validate the chain
 
+Keep the generated policy marker consistent with the project's existing authority;
+never upgrade an existing project by copying a newer template. See
+[policy compatibility](../governance-system/references/policy-compatibility.md).
+
+For an explicitly requested policy-2 readiness preview, read
+[references/graph-validation.md](references/graph-validation.md). It explains definition
+and edge checks, NFR tracing, and why a clean graph is not release readiness or acceptance.
+
 Run:
 
 ```bash
@@ -197,6 +205,7 @@ unverified visual behavior. Export failures never change canonical Markdown.
 - [references/tdd.md](references/tdd.md)
 - [references/house-style.md](references/house-style.md)
 - [references/verification.md](references/verification.md)
+- [references/graph-validation.md](references/graph-validation.md) — policy-2 readiness previews
 - [OPERATOR.md](OPERATOR.md)
 - `assets/` — canonical Markdown templates and export profiles
 - `scripts/validate_spec.py` — chain and traceability validator

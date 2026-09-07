@@ -14,11 +14,12 @@ from pathlib import Path
 import sys
 from typing import Any
 
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_spec as vs  # noqa: E402
 
 
-def load_chain(repo: Path, project: str) -> dict[str, Any]:
+def load_chain(repo: Path, project: str, requested_policy: str = "auto", mode: str = "governance") -> dict[str, Any]:
     docs = repo / "docs"
     con_path = docs / f"{project}-CON.md"
     fsd_path = docs / f"{project}-FSD.md"
@@ -26,6 +27,14 @@ def load_chain(repo: Path, project: str) -> dict[str, Any]:
     con_text = con_path.read_text(encoding="utf-8", errors="replace") if con_path.is_file() else ""
     fsd_text = fsd_path.read_text(encoding="utf-8", errors="replace") if fsd_path.is_file() else ""
     tsd_text = tsd_path.read_text(encoding="utf-8", errors="replace") if tsd_path.is_file() else ""
+    selected = vs.policy.evaluate_policy(repo, [con_path, fsd_path, tsd_path], requested_policy)
+    graph = None
+    if selected["policy_version"] == vs.policy.CURRENT_POLICY:
+        decisions_path = repo / "DECISIONS.md" if mode == "governance" else docs / f"{project}-DECISIONS.md"
+        decisions = decisions_path.read_text(encoding="utf-8") if decisions_path.is_file() else ""
+        graph = vs.sg.build_graph(con_text, fsd_text, tsd_text, decisions,
+                                 {"con": str(con_path), "fsd": str(fsd_path), "tsd": str(tsd_path), "decisions": str(decisions_path)})
+        con_text, fsd_text, tsd_text = (vs.ac.visible(text) for text in (con_text, fsd_text, tsd_text))
 
     if con_text:
         model = vs.parse_need_model(con_text, "con")
@@ -46,7 +55,18 @@ def load_chain(repo: Path, project: str) -> dict[str, Any]:
             "realizes": sorted(set(vs.ANY_F.findall(vs.label_value(body, "Realizes") or ""))),
             "purpose": vs.label_value(body, "Purpose") or "",
         }
-    return {"model": model, "f": f_items, "t": t_items, "has_fsd": bool(fsd_text), "has_tsd": bool(tsd_text)}
+    if graph is not None:
+        for node in graph["nodes"]:
+            if node["type"] in {"F", "F-NFR"}:
+                fields = node["fields"]
+                f_items[node["id"]] = {"needs": sorted(vs.ac.ids(fields.get("serves", ""), "UN")),
+                    "responses": sorted(vs.ac.ids(fields.get("serves", ""), "C")),
+                    "purpose": fields.get("purpose", fields.get("outcome", ""))}
+            elif node["type"] == "T":
+                t_items[node["id"]] = {"realizes": sorted(vs.ac.ids(node["fields"].get("realizes", ""), "F", "F-NFR")),
+                    "purpose": node["fields"].get("purpose", "")}
+    return {"model": model, "f": f_items, "t": t_items, "has_fsd": bool(fsd_text), "has_tsd": bool(tsd_text),
+            "graph": graph, "policy": selected}
 
 
 def trace_need(model: vs.NeedModel, need_id: str, lines: list[str], breaks: list[str], indent: str) -> None:
@@ -138,6 +158,8 @@ def trace(chain: dict[str, Any], identifier: str) -> tuple[list[str], list[str]]
 
 def trace_all(chain: dict[str, Any]) -> dict[str, Any]:
     report: dict[str, Any] = {"traced": {}, "breaks": []}
+    if chain.get("graph") is not None:
+        report["breaks"].extend(vs.ac.messages(chain["graph"]))
     for t_id in sorted(chain["t"]):
         lines, breaks = trace(chain, t_id)
         report["traced"][t_id] = lines
@@ -156,25 +178,42 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--project", required=True)
+    parser.add_argument("--mode", choices=["governance", "standalone"], default="governance")
     parser.add_argument("--id", dest="identifier", help="Trace one T-, F-, C- or UN- identifier backward")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--policy", choices=["auto", "legacy", "current"], default="auto")
     args = parser.parse_args()
     repo = Path(args.repo).expanduser().resolve()
-    chain = load_chain(repo, args.project)
+    chain = load_chain(repo, args.project, args.policy, args.mode)
     if not chain["has_fsd"]:
         result = {"valid": False, "breaks": [f"Missing docs/{args.project}-FSD.md"], "traced": {}}
     elif args.identifier:
         lines, breaks = trace(chain, args.identifier)
+        if chain["graph"] is not None:
+            breaks.extend(vs.ac.messages(chain["graph"]))
         result = {"valid": not breaks, "breaks": breaks, "traced": {args.identifier: lines}}
     else:
         report = trace_all(chain)
         result = {"valid": not report["breaks"], "breaks": report["breaks"], "traced": report["traced"]}
+    policy_result = vs.policy.evaluate_policy(
+        repo, [repo / "docs" / f"{args.project}-{kind}.md" for kind in ("CON", "FSD", "TSD")], args.policy
+    )
+    result.update(policy_result)
+    result["graph"] = chain["graph"]
+    result["graph_errors"] = vs.ac.messages(chain["graph"]) if chain["graph"] is not None else []
+    result["graph_warnings"] = vs.ac.messages(chain["graph"], "warning") if chain["graph"] is not None else []
+    result["graph_valid"] = not result["graph_errors"] if chain["graph"] is not None else None
+    result["artifact_valid"] = not result["breaks"]
+    result["breaks"].extend(policy_result["policy_errors"])
+    result["valid"] = not result["breaks"]
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:
         for identifier, lines in result["traced"].items():
             print("\n".join(lines) if lines else identifier)
             print()
+        for warning in result["graph_warnings"]:
+            print(f"warning: {warning}")
         if result["breaks"]:
             print("BREAKS:")
             for item in result["breaks"]:

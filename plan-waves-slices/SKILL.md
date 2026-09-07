@@ -92,6 +92,16 @@ meaning; any discovered specification defect returns to `spec-chain`.
 
 ### 6. Validate and stop
 
+Keep standalone policy metadata consistent with the existing project. Validation
+accepts `--policy auto|legacy|current`; choosing a preview never adopts a new policy.
+Read [policy compatibility](../governance-system/references/policy-compatibility.md)
+when auditing or updating an existing plan.
+
+For an explicitly requested policy-2 readiness preview, read
+[references/graph-validation.md](references/graph-validation.md). Graph checks cover
+membership, dependency order and recorded approval references; they never authenticate
+owner approval or authorize implementation. Legacy policy remains unchanged.
+
 Run:
 
 ```bash
@@ -120,6 +130,7 @@ never authorizes implementation. Wave 1 remains gated until the owner explicitly
 - [references/decision-intake.md](references/decision-intake.md)
 - [references/wave-semantics.md](references/wave-semantics.md)
 - [references/slice-semantics.md](references/slice-semantics.md)
+- [references/graph-validation.md](references/graph-validation.md) — policy-2 readiness previews
 - `../spec-chain/references/need-first.md` — what deserves to be scheduled
 - `assets/` — copyable planning documents
 - `scripts/validate_plan.py` — deterministic structural validator

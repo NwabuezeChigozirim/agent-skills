@@ -24,14 +24,33 @@
         "properties": {
           "id": { "type": "string", "pattern": "^R-[0-9]{3,}$" },
           "key": { "type": "string", "minLength": 32 },
-          "kind": { "enum": ["overlapping-paths", "divergent-base", "unfinished-variant"] },
+          "kind": { "enum": ["overlapping-paths", "divergent-base", "unfinished-variant", "incomplete-recovery", "unavailable-worktree"] },
           "worktrees": {
             "type": "array",
-            "minItems": 2,
+            "minItems": 1,
             "items": { "type": "string" }
           },
           "paths": { "type": "array", "items": { "type": "string" } },
           "snapshots": { "type": "array" },
+          "scope_key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "review_fingerprint": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+          "retired_at": { "type": "string" },
+          "supersedes": { "type": "array", "items": { "type": "string", "pattern": "^R-[0-9]{3,}$" } },
+          "superseded_by": { "type": "array", "items": { "type": "string", "pattern": "^R-[0-9]{3,}$" } },
+          "decision_history": { "type": "array", "items": { "type": "object" } },
+          "coverage_snapshot": { "type": "string" },
+          "recovery_gaps": { "type": "array", "items": { "type": "object" } },
+          "recovery_refs": { "type": "array", "items": { "type": "string", "pattern": "^refs/governance/snapshots/[0-9a-f]{40,64}$" } },
+          "alternative_recovery": {
+            "type": "object",
+            "required": ["path", "sha256", "size", "coverage_authority"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "size": { "type": "integer", "minimum": 1 },
+              "coverage_authority": { "const": "owner-attested" }
+            }
+          },
           "choice": {
             "enum": [
               "keep-canonical",

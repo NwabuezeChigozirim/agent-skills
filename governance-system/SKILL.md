@@ -26,6 +26,11 @@ Run `doctor` before installation and `status` before resuming. The runtime uses 
 Python's standard library and Git. Read [references/runtime.md](references/runtime.md)
 for command and exit-code contracts.
 
+For audit requests, run `audit` and report; do not enter the mutating workflow below.
+For upgrades, preview with `upgrade --dry-run` and apply only with explicit project
+authorization. Read [references/policy-compatibility.md](references/policy-compatibility.md)
+for policy selection, release gates and metadata-only migration.
+
 ## Select one lifecycle mode
 
 Detect the mode; ask only when evidence is ambiguous.
@@ -39,11 +44,18 @@ Detect the mode; ask only when evidence is ambiguous.
 
 Read [references/lifecycle.md](references/lifecycle.md) before acting.
 
+For an explicitly opted-in stage contract, read
+[references/stage-contracts.md](references/stage-contracts.md) before the bounded work
+begins. Freeze the approved scope, inputs and checks first; governance does not re-plan.
+`phase` is progress state, not completion. Policy-1 runs without opt-in retain legacy
+behavior; policy 2 remains unreleased.
+
 ## Mandatory workflow
 
 ### 1. Preflight and canonical state
 
-1. Run `doctor`, then `discover`.
+1. For authorized install/resume/repair work, run `doctor`, then `discover`. Audit
+   and upgrade previews never run `discover` or `reconcile`.
 2. Inventory every local worktree before writing.
 3. Confirm the canonical worktree, branch, and HEAD recorded by the runtime. It defaults
    to the main worktree; change it with `set-canonical --path` only on owner instruction.
@@ -55,6 +67,12 @@ Read [references/lifecycle.md](references/lifecycle.md) before acting.
 
 Read [references/resolution-policy.md](references/resolution-policy.md) for conflict
 classes and closure rules.
+
+Review is content-bound: an R-ID approves only its captured version. Reconcile after
+changes; never reuse a retired choice for new content. Read
+[references/recovery.md](references/recovery.md) when recovery is incomplete or needed.
+Excluded content requires an explicit owner-attested backup, not a generic “snapshotted”
+claim; unknown current worktree contents cannot be waived.
 
 ### 2. Build one Discovery Packet
 
@@ -147,7 +165,8 @@ Run `governancectl validate`; it runs the specification and planning validators 
 once their documents exist. Repair all errors. A stage closes only when:
 
 - all local worktrees were rescanned;
-- unfinished variants were snapshotted;
+- current versions have intact recovery payloads and retained base commits; incomplete
+  coverage has an available, unchanged owner-attested backup;
 - no blocking or pending resolution remains (adopt/combine/return-to-agent stay
   pending until the variant is actually gone);
 - generated governance and planning documents validate;
@@ -156,6 +175,10 @@ once their documents exist. Repair all errors. A stage closes only when:
 - the owner explicitly approves closure.
 
 Run `close-stage`; do not simulate closure by editing state files.
+Contracted closure additionally requires current successful `run-check` receipts and
+`--approval-ref` for the owner's actual sign-off. Resolve blocking/needs-owner N-IDs
+through `resolve-note` with a ratified D-ID. Changed frozen inputs require owner review
+and explicit cancellation/replacement, never silent reinterpretation of the contract.
 
 ## Failure policy
 
@@ -174,6 +197,8 @@ Run `close-stage`; do not simulate closure by editing state files.
 - [references/artifact-authority.md](references/artifact-authority.md)
 - [references/conflict-policy.md](references/conflict-policy.md)
 - [references/resolution-policy.md](references/resolution-policy.md)
+- [references/recovery.md](references/recovery.md)
+- [references/stage-contracts.md](references/stage-contracts.md)
 - [references/hooks.md](references/hooks.md)
 - [references/runtime.md](references/runtime.md)
 - [OPERATOR.md](OPERATOR.md) — command-focused operator guide

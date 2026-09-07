@@ -34,6 +34,13 @@ Notes receive stable `N-###` IDs, live in `<git-common-dir>/governance/discovery
 and are merged into `discovery.json` on every `discover`. Do not hand-edit
 `discovery.json`.
 
+Under explicit stage contracts, `blocking` and `needs-owner` notes gate checks and
+closure until `resolve-note --id N-### --decision D-### --note TEXT --owner-approved`
+records their owner-ratified resolution. This preserves the original finding and its
+evidence class, and decision-row changes reopen the obligation. See
+[stage-contracts.md](stage-contracts.md); a phase transition or passing test is not a
+resolution, and default legacy runs do not silently adopt these new gates.
+
 ## Provenance
 
 - `code` — read from source or config; cite a path.

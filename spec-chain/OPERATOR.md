@@ -16,6 +16,17 @@ Read `references/need-first.md` once; every other document points at it.
 
 ## Validate
 
+Validators and trace walking are read-only. They accept `--policy auto|legacy|current`
+and report the effective policy in JSON. Unversioned projects remain legacy;
+current-policy previews explicitly report that policy 2 is not yet released. See
+[policy compatibility](../governance-system/references/policy-compatibility.md).
+
+Policy-2 previews now check definition-backed ratification, exact realization/Serves
+edges and NFR verification. They expose `artifact_valid`, `graph_valid` and specific
+graph findings while still refusing unreleased policy-2 activation. See
+[graph validation](references/graph-validation.md). Pass `--mode standalone` to the
+trace walker as well as the validator when using a standalone decision register.
+
 ```bash
 python3 scripts/validate_spec.py --repo /path/to/repository --project project-slug --mode governance
 python3 scripts/trace_chain.py   --repo /path/to/repository --project project-slug

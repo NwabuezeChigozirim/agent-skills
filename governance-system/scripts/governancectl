@@ -8,16 +8,24 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import gzip
+import io
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 from typing import Any, Iterator
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import engineering_policy as policy  # noqa: E402
+import stage_contracts as stages  # noqa: E402
 
 
 SCHEMA_VERSION = 3
@@ -62,6 +70,7 @@ def run_process(
         check=False,
         capture_output=True,
         text=text,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
     if check and result.returncode != 0:
         stderr = result.stderr.strip() if text else result.stderr.decode(errors="replace").strip()
@@ -74,12 +83,12 @@ def run_process(
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:
-    result = run_process(["git", *args], repo, check=check, text=True)
+    result = run_process(["git", "--no-optional-locks", *args], repo, check=check, text=True)
     return result.stdout.strip()
 
 
 def git_bytes(repo: Path, *args: str, check: bool = True) -> bytes:
-    result = run_process(["git", *args], repo, check=check, text=False)
+    result = run_process(["git", "--no-optional-locks", *args], repo, check=check, text=False)
     return result.stdout
 
 
@@ -119,18 +128,24 @@ def read_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise GovernanceError(f"Malformed governance JSON: {path}: {exc}", EXIT_VALIDATION)
+    if not isinstance(value, dict):
+        raise GovernanceError(f"Governance JSON must be an object: {path}", EXIT_VALIDATION)
+    return value
 
 
 def atomic_write_json(path: Path, value: Any, *, mode: int = 0o600) -> None:
+    atomic_write_bytes(path, (json.dumps(value, indent=2, sort_keys=True) + "\n").encode(), mode=mode)
+
+
+def atomic_write_bytes(path: Path, payload: bytes, *, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
         os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -187,18 +202,38 @@ def canonical_state_path(repo: Path) -> Path:
 
 
 def load_canonical(repo: Path) -> dict[str, Any]:
+    """Read the selection or derive its default without persisting it."""
     stored = read_json(canonical_state_path(repo))
+    if stored is not None and (
+        not isinstance(stored.get("canonical_worktree"), str) or not stored["canonical_worktree"].strip()
+    ):
+        raise GovernanceError("Canonical state requires a canonical_worktree path", EXIT_VALIDATION)
     if stored is None:
         default = main_worktree(repo)
+        selected_by = "default-main-worktree"
+        config = load_config(repo)
+        if config and config["schema_version"] in LEGACY_SCHEMA_VERSIONS:
+            previous = config.get("canonical_worktree")
+            if previous:
+                candidate = Path(previous).expanduser().resolve()
+                listed = {Path(item["path"]) for item in parse_worktrees(repo)}
+                if candidate.is_dir() and candidate in listed:
+                    default = candidate
+                    selected_by = "legacy-config"
         stored = {
             "schema_version": SCHEMA_VERSION,
             "canonical_worktree": str(default),
             "canonical_branch": branch_name(default),
-            "selected_by": "default-main-worktree",
+            "selected_by": selected_by,
             "updated_at": utc_now(),
         }
-        atomic_write_json(canonical_state_path(repo), stored)
     return stored
+
+
+def initialize_canonical(repo: Path) -> None:
+    """Only explicit state-changing operations may materialize the default."""
+    if not canonical_state_path(repo).exists():
+        atomic_write_json(canonical_state_path(repo), load_canonical(repo))
 
 
 def save_canonical(repo: Path, worktree: Path, selected_by: str) -> dict[str, Any]:
@@ -259,7 +294,7 @@ def parse_status(worktree: Path) -> dict[str, Any]:
             continue
         status = token[:2]
         path = token[3:]
-        if status[0] in {"R", "C"} and index < len(tokens):
+        if any(flag in status for flag in "RC") and index < len(tokens):
             original = tokens[index]
             index += 1
             if original:
@@ -281,26 +316,76 @@ def parse_status(worktree: Path) -> dict[str, Any]:
     }
 
 
-def hash_dirty_files(worktree: Path, paths: list[str]) -> dict[str, str]:
-    hashes: dict[str, str] = {}
-    for relative in paths:
-        candidate = (worktree / relative).resolve()
-        try:
-            candidate.relative_to(worktree.resolve())
-        except ValueError:
-            continue
-        if candidate.is_file() and not candidate.is_symlink():
-            digest = hashlib.sha256()
-            try:
-                with candidate.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                hashes[relative] = digest.hexdigest()
-            except OSError:
-                hashes[relative] = "unreadable"
-        elif not candidate.exists():
-            hashes[relative] = "deleted"
-    return hashes
+def fingerprint(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+@contextlib.contextmanager
+def path_parent(root: Path, relative: str) -> Iterator[tuple[int, str]]:
+    """Anchor each component; never follow a dirty path outside its worktree."""
+    parts = Path(relative).parts
+    if not parts or Path(relative).is_absolute() or ".." in parts:
+        raise OSError("Unsafe worktree-relative path")
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        yield fd, parts[-1]
+    finally:
+        os.close(fd)
+
+
+def file_state(root: Path, relative: str, *, capture_limit: int | None = None) -> tuple[dict[str, Any], bytes | None]:
+    """Hash raw bytes, not filtered Git content. Capture only within the supplied budget."""
+    try:
+        with path_parent(root, relative) as (parent, leaf):
+            info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+            mode = stat.S_IMODE(info.st_mode)
+            if stat.S_ISLNK(info.st_mode):
+                target = os.fsencode(os.readlink(leaf, dir_fd=parent))
+                return {"kind": "symlink", "mode": mode, "size": len(target),
+                        "sha256": hashlib.sha256(target).hexdigest()}, target
+            if not stat.S_ISREG(info.st_mode):
+                return {"kind": "unsupported", "mode": mode}, None
+            fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, "rb") as handle:
+                opened = os.fstat(handle.fileno())
+                if not stat.S_ISREG(opened.st_mode):
+                    return {"kind": "unsupported"}, None
+                digest = hashlib.sha256()
+                chunks = [] if capture_limit is not None and opened.st_size <= capture_limit else None
+                size = 0
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+                    if chunks is not None:
+                        if size <= capture_limit:
+                            chunks.append(chunk)
+                        else:
+                            chunks = None
+                return {"kind": "file", "mode": stat.S_IMODE(opened.st_mode), "size": size,
+                        "sha256": digest.hexdigest()}, b"".join(chunks) if chunks is not None else None
+    except FileNotFoundError:
+        return {"kind": "deleted"}, None
+    except OSError:
+        return {"kind": "unreadable"}, None
+
+
+def scan_worktree(root: Path) -> dict[str, Any]:
+    status = parse_status(root)
+    entries = []
+    for token in git_bytes(root, "ls-files", "--stage", "-z").split(b"\0"):
+        if token:
+            header, path = token.split(b"\t", 1)
+            mode, oid, stage = header.decode("ascii").split()
+            entries.append({"path": os.fsdecode(path), "mode": mode, "oid": oid, "stage": int(stage)})
+    files = {path: file_state(root, path)[0] for path in status["dirty_paths"]}
+    state = {**status, "head": current_head(root), "index_entries": entries, "files": files}
+    return {**state, "availability": "available", "content_fingerprint": fingerprint(state),
+            "content_verifiable": all(value["kind"] in {"file", "symlink", "deleted"} for value in files.values()),
+            "hashes": {path: value.get("sha256", value["kind"]) for path, value in files.items()}}
 
 
 def divergence(canonical: Path, canonical_head: str, other: Path, other_head: str) -> dict[str, Any]:
@@ -327,39 +412,19 @@ def load_config(repo: Path, *, required: bool = False) -> dict[str, Any] | None:
         )
     if config is not None:
         version = config.get("schema_version")
-        if version in LEGACY_SCHEMA_VERSIONS:
-            config = migrate_legacy_config(repo, config)
-        elif version != SCHEMA_VERSION:
+        if type(version) is not int or version not in LEGACY_SCHEMA_VERSIONS | {SCHEMA_VERSION}:
             raise GovernanceError("Unsupported governance config schema", EXIT_VALIDATION)
-        if config.get("repository_id") != repo_identity(repo):
+        try:
+            policy.policy_version(config.get("policy_version", policy.LEGACY_POLICY))
+        except ValueError as exc:
+            raise GovernanceError(str(exc), EXIT_VALIDATION) from exc
+        if version in LEGACY_SCHEMA_VERSIONS and config.get("canonical_worktree") is not None:
+            if not isinstance(config["canonical_worktree"], str):
+                raise GovernanceError("Legacy canonical_worktree must be a path string", EXIT_VALIDATION)
+        # Schema 2 used machine paths as identity. Read it as legacy; only explicit
+        # upgrade rewrites its identity or moves its canonical selection.
+        if version == SCHEMA_VERSION and config.get("repository_id") != repo_identity(repo):
             raise GovernanceError("Governance config belongs to a different repository", EXIT_VALIDATION)
-    return config
-
-
-def migrate_legacy_config(repo: Path, legacy: dict[str, Any]) -> dict[str, Any]:
-    # v2 stored a path-derived repository_id and absolute canonical paths in the
-    # committed file. Move the machine-specific parts to local state and re-derive
-    # the identity from history.
-    previous_canonical = legacy.get("canonical_worktree")
-    if previous_canonical and not canonical_state_path(repo).exists():
-        candidate = Path(previous_canonical).expanduser()
-        listed = {Path(item["path"]).resolve() for item in parse_worktrees(repo)}
-        if candidate.is_dir() and candidate.resolve() in listed:
-            save_canonical(repo, candidate.resolve(), "migrated-from-v2-config")
-    config = {
-        "schema_version": SCHEMA_VERSION,
-        "suite_version": SUITE_VERSION,
-        "repository_id": repo_identity(repo),
-        "enabled": bool(legacy.get("enabled", True)),
-        "hooks_enabled": bool(legacy.get("hooks_enabled", False)),
-        "project_slug": legacy.get("project_slug") or default_project_slug(repo),
-        "created_at": legacy.get("created_at") or utc_now(),
-        "migrated_at": utc_now(),
-    }
-    for key in ("hooks_installed_at",):
-        if key in legacy:
-            config[key] = legacy[key]
-    atomic_write_json(config_path(repo), config, mode=0o644)
     return config
 
 
@@ -375,6 +440,7 @@ def ensure_config(repo: Path) -> dict[str, Any]:
     config = {
         "schema_version": SCHEMA_VERSION,
         "suite_version": SUITE_VERSION,
+        "policy_version": policy.DEFAULT_POLICY,
         "repository_id": repo_identity(repo),
         "enabled": True,
         "hooks_enabled": False,
@@ -399,37 +465,38 @@ def canonical_repo(repo: Path) -> Path:
 
 def inventory(repo: Path) -> dict[str, Any]:
     canonical = canonical_repo(repo)
-    canonical_head = current_head(canonical)
+    entries = parse_worktrees(repo)
+    canonical_entry = next(entry for entry in entries if entry["path"] == str(canonical))
     items: list[dict[str, Any]] = []
-    for entry in parse_worktrees(repo):
+    for entry in entries:
         worktree = Path(entry["path"])
-        if entry.get("bare") or not worktree.is_dir():
+        try:
+            if entry.get("bare") or not worktree.is_dir():
+                raise OSError("Worktree directory is unavailable")
+            status = scan_worktree(worktree)
+        except (OSError, GovernanceError) as exc:
             status = {
-                "staged": [],
-                "unstaged": [],
-                "untracked": [],
-                "dirty_paths": [],
-                "dirty": False,
+                "staged": [], "unstaged": [], "untracked": [], "dirty_paths": [],
+                "dirty": None, "hashes": {}, "files": {}, "index_entries": [],
+                "availability": "unavailable", "scan_error": str(exc),
+                "content_fingerprint": fingerprint(["unavailable", entry["path"], entry.get("head")]),
             }
-            hashes: dict[str, str] = {}
-        else:
-            status = parse_status(worktree)
-            hashes = hash_dirty_files(worktree, status["dirty_paths"])
-        head = entry.get("head") or current_head(worktree)
         item = {
             **entry,
             **status,
-            "hashes": hashes,
             "canonical": worktree.resolve() == canonical,
-            "divergence": divergence(canonical, canonical_head, worktree, head),
             "scanned_at": utc_now(),
         }
         items.append(item)
+    canonical_item = next(item for item in items if item["canonical"])
+    canonical_head = canonical_item["head"]
+    for item in items:
+        item["divergence"] = divergence(repo, canonical_head, Path(item["path"]), item["head"])
     return {
         "schema_version": SCHEMA_VERSION,
         "repository_id": repo_identity(repo),
         "canonical_worktree": str(canonical),
-        "canonical_branch": branch_name(canonical),
+        "canonical_branch": canonical_entry.get("branch", "(detached)"),
         "canonical_head": canonical_head,
         "worktrees": items,
         "scanned_at": utc_now(),
@@ -621,6 +688,7 @@ def discovery_packet(repo: Path, registry: dict[str, Any]) -> dict[str, Any]:
                 "branch": item.get("branch", "(detached)"),
                 "head": item.get("head"),
                 "dirty": item["dirty"],
+                "availability": item["availability"],
                 "dirty_paths": item["dirty_paths"],
             }
             for item in registry["worktrees"]
@@ -648,75 +716,291 @@ def is_sensitive_path(relative: str) -> bool:
 
 def safe_snapshot_name(worktree: dict[str, Any]) -> str:
     path_hash = hashlib.sha256(worktree["path"].encode("utf-8")).hexdigest()[:10]
-    return f"{path_hash}-{worktree.get('head', 'unknown')[:12]}"
+    version = fingerprint([2, worktree["content_fingerprint"], MAX_SNAPSHOT_BYTES])
+    return f"v2-{path_hash}-{version}"
+
+
+def recovery_ref(head: str) -> str:
+    return f"refs/governance/snapshots/{head}"
+
+
+def check_recovery_ref(repo: Path, head: str) -> bool:
+    ref = recovery_ref(head)
+    return (not git(repo, "symbolic-ref", "--quiet", ref, check=False)
+            and git(repo, "rev-parse", "--verify", ref, check=False) == head
+            and git(repo, "cat-file", "-t", head, check=False) == "commit")
+
+
+def pin_head(repo: Path, head: str) -> str:
+    """Create a retention ref, never update an existing ref or a user's branch."""
+    ref = recovery_ref(head)
+    if git(repo, "symbolic-ref", "--quiet", ref, check=False):
+        raise GovernanceError(f"Refusing symbolic recovery ref: {ref}", EXIT_UNSAFE)
+    if not check_recovery_ref(repo, head):
+        if git(repo, "cat-file", "-t", head, check=False) != "commit":
+            raise GovernanceError(f"Recovery base commit unavailable: {head}", EXIT_GATE)
+        git(repo, "update-ref", "--no-deref", ref, head, "0" * len(head))
+        if not check_recovery_ref(repo, head):
+            raise GovernanceError(f"Cannot retain recovery base: {ref}", EXIT_GATE)
+    return ref
+
+
+def snapshot_errors(repo: Path, manifest: dict[str, Any]) -> list[str]:
+    if manifest.get("snapshot_format") != 2:
+        return ["Legacy snapshot has no verifiable recovery coverage; reconcile available work or provide a backup"]
+    errors = []
+    directory = state_dir(repo) / "snapshots"
+    identifier = manifest.get("snapshot_id", "")
+    payloads = manifest.get("payloads", {})
+    if (not isinstance(identifier, str) or not re.fullmatch(r"v2-[0-9a-f]{10}-[0-9a-f]{64}", identifier)
+            or not isinstance(manifest.get("head"), str) or not re.fullmatch(r"[0-9a-f]{40,64}", manifest["head"])
+            or not isinstance(payloads, dict) or not all(isinstance(value, dict) for value in payloads.values())
+            or not isinstance(manifest.get("files"), dict) or not isinstance(manifest.get("index_entries"), list)
+            or not isinstance(manifest.get("coverage"), dict)
+            or manifest["coverage"].get("status") not in {"complete", "incomplete"}
+            or not isinstance(manifest["coverage"].get("gaps"), list)):
+        return [f"Malformed recovery manifest: {identifier}"]
+    if bool(manifest["coverage"]["gaps"]) != (manifest["coverage"]["status"] == "incomplete"):
+        errors.append(f"Inconsistent recovery coverage: {identifier}")
+    metadata = {key: value for key, value in manifest.items() if key != "manifest_fingerprint"}
+    if manifest.get("manifest_fingerprint") != fingerprint(metadata):
+        errors.append(f"Changed recovery metadata: {identifier}")
+    if manifest.get("base_ref") != recovery_ref(manifest["head"]):
+        errors.append(f"Inconsistent recovery base ref: {identifier}")
+    expected = {f"{identifier}{suffix}" for suffix in (".patch", "-untracked.tar.gz", "-worktree.tar.gz", "-index.tar.gz")}
+    if set(payloads) != expected:
+        errors.append(f"Incomplete snapshot payload inventory: {identifier}")
+    for name, digest in payloads.items():
+        if name not in expected:
+            continue
+        actual, _ = file_state(directory, name)
+        if actual.get("kind") != "file" or any(actual.get(key) != digest.get(key) for key in ("sha256", "size")):
+            errors.append(f"Missing or changed recovery payload: {name}")
+    if not check_recovery_ref(repo, manifest.get("head", "")):
+        errors.append(f"Missing or changed recovery base: {identifier}")
+    return errors
+
+
+def publish_immutable(source: Path, target: Path) -> None:
+    """Manifest-last, create-only publication; retries may reuse identical orphan payloads."""
+    try:
+        os.link(source, target)
+    except FileExistsError:
+        if file_state(source.parent, source.name)[0] != file_state(target.parent, target.name)[0]:
+            raise GovernanceError(f"Refusing to overwrite recovery data: {target}", EXIT_UNSAFE)
+    directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+@contextlib.contextmanager
+def snapshot_tar(path: Path) -> Iterator[tarfile.TarFile]:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
+                yield archive
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def add_snapshot_file(archive: tarfile.TarFile, name: str, state: dict[str, Any], data: bytes) -> None:
+    info = tarfile.TarInfo(name)
+    info.mode = state.get("mode", 0o600)
+    if state["kind"] == "symlink":
+        info.type = tarfile.SYMTYPE
+        info.linkname = os.fsdecode(data)
+        archive.addfile(info)
+    else:
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+
+def convenience_patch(root: Path) -> tuple[bytes, str]:
+    """Bound optional diff output before allocating it; recovery does not depend on it."""
+    command = ["git", "--no-optional-locks", "-c", "color.ui=false", "diff", "--no-ext-diff", "--no-textconv",
+               "--no-renames", "--binary", "HEAD", "--"]
+    with tempfile.TemporaryFile() as errors:
+        with subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE, stderr=errors) as process:
+            assert process.stdout is not None
+            data = process.stdout.read(MAX_SNAPSHOT_BYTES + 1)
+            if len(data) > MAX_SNAPSHOT_BYTES:
+                process.kill()
+                process.communicate()
+                return b"", "omitted-size-limit"
+            process.wait()
+            if process.returncode:
+                return b"", "omitted-diff-unavailable"
+    return data, "included"
 
 
 def snapshot_worktree(repo: Path, worktree: dict[str, Any]) -> dict[str, Any]:
     root = Path(worktree["path"])
     snapshot_root = state_dir(repo) / "snapshots"
-    snapshot_root.mkdir(parents=True, exist_ok=True)
+    if snapshot_root.is_symlink():
+        raise GovernanceError("Snapshot directory must not be a symlink", EXIT_UNSAFE)
+    snapshot_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     identifier = safe_snapshot_name(worktree)
-    patch_path = snapshot_root / f"{identifier}.patch"
-    archive_path = snapshot_root / f"{identifier}-untracked.tar.gz"
     manifest_path = snapshot_root / f"{identifier}.json"
-
-    patch = git_bytes(root, "diff", "--binary", "HEAD")
-    if len(patch) > MAX_SNAPSHOT_BYTES:
-        raise GovernanceError(
-            f"Tracked snapshot exceeds {MAX_SNAPSHOT_BYTES} bytes for {root}",
-            EXIT_UNSAFE,
-        )
-    patch_path.write_bytes(patch)
-    os.chmod(patch_path, 0o600)
-
+    if manifest_path.is_symlink():
+        raise GovernanceError("Snapshot manifest must not be a symlink", EXIT_UNSAFE)
+    if manifest_path.exists():
+        manifest = read_json(manifest_path)
+        errors = snapshot_errors(repo, manifest)
+        if manifest.get("snapshot_id") != identifier or manifest.get("content_fingerprint") != worktree["content_fingerprint"]:
+            errors.append(f"Snapshot identity mismatch: {identifier}")
+        if errors:
+            raise GovernanceError("; ".join(errors), EXIT_GATE)
+        return {**manifest, "_created": False}
+    base_ref = pin_head(repo, worktree["head"])
+    gaps: list[dict[str, str]] = []
     included: list[str] = []
-    excluded_sensitive: list[str] = []
-    skipped: list[str] = []
-    total = 0
-    with tarfile.open(archive_path, "w:gz") as archive:
-        for relative in worktree["untracked"]:
-            candidate = (root / relative).resolve()
-            try:
-                candidate.relative_to(root.resolve())
-            except ValueError:
-                skipped.append(relative)
-                continue
-            if is_sensitive_path(relative):
-                excluded_sensitive.append(relative)
-                continue
-            if not candidate.is_file() or candidate.is_symlink():
-                skipped.append(relative)
-                continue
-            size = candidate.stat().st_size
-            if total + size > MAX_SNAPSHOT_BYTES:
-                skipped.append(relative)
-                continue
-            archive.add(candidate, arcname=relative, recursive=False)
-            total += size
-            included.append(relative)
-    os.chmod(archive_path, 0o600)
+    index_entries = [entry for entry in worktree["index_entries"] if entry["path"] in worktree["dirty_paths"]]
+    names = {"tracked_patch": f"{identifier}.patch", "untracked_archive": f"{identifier}-untracked.tar.gz",
+             "working_archive": f"{identifier}-worktree.tar.gz", "index_archive": f"{identifier}-index.tar.gz"}
+    remaining = MAX_SNAPSHOT_BYTES
+    with tempfile.TemporaryDirectory(prefix=".capture-", dir=snapshot_root) as temporary:
+        staging = Path(temporary)
+        with snapshot_tar(staging / names["working_archive"]) as tracked, snapshot_tar(staging / names["untracked_archive"]) as untracked:
+            for relative in worktree["dirty_paths"]:
+                expected = worktree["files"][relative]
+                if is_sensitive_path(relative):
+                    gaps.append({"path": relative, "reason": "excluded-sensitive"})
+                    continue
+                state, data = file_state(root, relative, capture_limit=remaining)
+                if state != expected:
+                    raise GovernanceError(f"Worktree changed during recovery capture: {root}; reconcile again", EXIT_GATE)
+                if state["kind"] == "deleted":
+                    continue
+                if data is None or len(data) > remaining:
+                    gaps.append({"path": relative, "reason": state["kind"] if state["kind"] not in {"file", "symlink"} else "size-limit"})
+                    continue
+                archive = untracked if relative in worktree["untracked"] else tracked
+                add_snapshot_file(archive, relative, state, data)
+                remaining -= len(data)
+                if relative in worktree["untracked"]:
+                    included.append(relative)
+        captured_oids = set()
+        with snapshot_tar(staging / names["index_archive"]) as archive:
+            for entry in index_entries:
+                relative, oid = entry["path"], entry["oid"]
+                if is_sensitive_path(relative):
+                    continue  # Already reported; do not copy staged secrets either.
+                if entry["mode"] not in {"100644", "100755", "120000"} or set(oid) == {"0"}:
+                    gaps.append({"path": relative, "reason": "unsupported-index-entry"})
+                    continue
+                if oid in captured_oids:
+                    continue
+                size = git(root, "cat-file", "-s", oid, check=False)
+                if not size.isdigit() or int(size) > remaining:
+                    gaps.append({"path": relative, "reason": "index-unavailable-or-size-limit"})
+                    continue
+                data = git_bytes(root, "cat-file", "blob", oid)
+                add_snapshot_file(archive, f"objects/{oid}", {"kind": "file", "mode": 0o600}, data)
+                captured_oids.add(oid)
+                remaining -= len(data)
+        # Convenience only. Raw working/index archives, not this net diff, define recovery.
+        # Skip the diff entirely for incomplete captures (including sensitive renames).
+        patch = b""
+        patch_status = "omitted-incomplete-capture"
+        if not gaps:
+            patch, patch_status = convenience_patch(root)
+        atomic_write_bytes(staging / names["tracked_patch"], patch)
+        if scan_worktree(root)["content_fingerprint"] != worktree["content_fingerprint"]:
+            raise GovernanceError(f"Worktree changed during recovery capture: {root}; reconcile again", EXIT_GATE)
+        manifest = {
+            "schema_version": SCHEMA_VERSION, "snapshot_format": 2, "snapshot_id": identifier,
+            "content_fingerprint": worktree["content_fingerprint"], "capture_limit_bytes": MAX_SNAPSHOT_BYTES,
+            "worktree": worktree["path"], "branch": worktree.get("branch", "(detached)"),
+            "head": worktree["head"], "base_ref": base_ref, "dirty_paths": worktree["dirty_paths"],
+            "files": worktree["files"], "index_entries": index_entries, "index_objects": sorted(captured_oids),
+            **{key: str(snapshot_root / name) for key, name in names.items()},
+            "patch_status": patch_status, "untracked_included": included,
+            "untracked_excluded_sensitive": [p for p in worktree["untracked"] if is_sensitive_path(p)],
+            "untracked_skipped": [g["path"] for g in gaps if g["path"] in worktree["untracked"]],
+            "coverage": {"status": "incomplete" if gaps else "complete", "gaps": gaps},
+            "payloads": {name: {key: file_state(staging, name)[0][key] for key in ("sha256", "size")} for name in names.values()},
+            "created_at": utc_now(),
+        }
+        manifest["manifest_fingerprint"] = fingerprint(manifest)
+        for name in names.values():
+            publish_immutable(staging / name, snapshot_root / name)
+        atomic_write_json(staging / manifest_path.name, manifest)
+        publish_immutable(staging / manifest_path.name, manifest_path)
+    return {**manifest, "_created": True}
 
-    manifest = {
-        "schema_version": SCHEMA_VERSION,
-        "snapshot_id": identifier,
-        "worktree": worktree["path"],
-        "branch": worktree.get("branch", "(detached)"),
-        "head": worktree.get("head"),
-        "dirty_paths": worktree["dirty_paths"],
-        "tracked_patch": str(patch_path),
-        "untracked_archive": str(archive_path),
-        "untracked_included": included,
-        "untracked_excluded_sensitive": excluded_sensitive,
-        "untracked_skipped": skipped,
-        "created_at": utc_now(),
-    }
-    atomic_write_json(manifest_path, manifest)
-    return manifest
+
+def resolution_version(record: dict[str, Any], registry: dict[str, Any]) -> str | None:
+    items = {item["path"]: item for item in registry["worktrees"]}
+    names = record["worktrees"]
+    if any(name not in items or items[name]["availability"] != "available" for name in names):
+        return None
+    kind = record["kind"]
+    if kind == "overlapping-paths":
+        paths = record["paths"]
+        # Only the shared paths are under this review, not unrelated local work.
+        return fingerprint([[name, items[name]["head"],
+                             {p: items[name]["files"].get(p) for p in paths},
+                             [e for e in items[name]["index_entries"] if e["path"] in paths]] for name in sorted(names)])
+    if kind == "divergent-base":
+        return fingerprint([registry["canonical_head"], items[names[-1]]["head"]])
+    if kind == "unfinished-variant":
+        return fingerprint([registry["canonical_head"], items[names[-1]]["content_fingerprint"]])
+    if kind == "incomplete-recovery":
+        return items[names[0]]["content_fingerprint"]
+    return None
 
 
-def resolution_key(kind: str, worktrees: list[str], paths: list[str]) -> str:
-    raw = json.dumps([kind, sorted(worktrees), sorted(paths)], separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+def proposed_resolutions(registry: dict[str, Any], snapshots: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    proposed: list[dict[str, Any]] = []
+    worktrees = registry["worktrees"]
+    canonical = next(item for item in worktrees if item["canonical"])
+
+    def add(kind: str, items: list[dict[str, Any]], paths: list[str], recommendation: str, **extra: Any) -> None:
+        names = [item["path"] for item in items]
+        record = {"kind": kind, "worktrees": names, "paths": paths, "recommendation": recommendation,
+                  "snapshots": [snapshots[name]["snapshot_id"] for name in names if name in snapshots], **extra}
+        version = resolution_version(record, registry)
+        if kind == "unavailable-worktree":
+            version = fingerprint([names, items[0].get("head"), "unavailable"])
+        record["review_fingerprint"] = version
+        record["scope_key"] = fingerprint([kind, sorted(names)])
+        record["key"] = fingerprint([record["scope_key"], paths, version, record.get("coverage_snapshot")])
+        proposed.append(record)
+
+    for left_index, left in enumerate(worktrees):
+        for right in worktrees[left_index + 1:]:
+            overlap = sorted(set(left["dirty_paths"]).intersection(right["dirty_paths"]))
+            if overlap:
+                add("overlapping-paths", [left, right], overlap, "Review both captured versions and choose a disposition")
+    for item in worktrees:
+        if item["availability"] != "available":
+            add("unavailable-worktree", [item], [], "Restore access and reconcile; unknown work cannot be waived")
+            continue
+        if not item.get("content_verifiable", True):
+            add("unavailable-worktree", [item], item["dirty_paths"],
+                "Current dirty content cannot be fingerprinted; restore readable supported files and reconcile. A backup alone cannot establish the current version")
+        snapshot = snapshots.get(item["path"])
+        if snapshot and snapshot["coverage"]["status"] != "complete":
+            add("incomplete-recovery", [item], item["dirty_paths"],
+                "Supply an owner-attested alternative backup for the uncovered content before closure",
+                snapshots=[snapshot["snapshot_id"]], coverage_snapshot=snapshot["snapshot_id"],
+                recovery_gaps=snapshot["coverage"]["gaps"])
+        if item["canonical"]:
+            continue
+        if item["dirty"]:
+            add("unfinished-variant", [canonical, item], item["dirty_paths"],
+                "Integrate, defer, obsolete, or return this captured variant before stage closure",
+                snapshots=[snapshot["snapshot_id"]] if snapshot else [])
+        ahead = item["divergence"].get("ahead")
+        if ahead is None or ahead > 0:
+            add("divergent-base", [canonical, item], [],
+                "Review committed work against canonical intent; commits are retained locally, not integrated",
+                snapshots=[], head=item["head"], branch=item.get("branch", "(detached)"), ahead=ahead,
+                behind=item["divergence"].get("behind"), recovery_refs=[recovery_ref(item["head"])])
+    return proposed
 
 
 def build_resolutions(
@@ -726,125 +1010,67 @@ def build_resolutions(
 ) -> dict[str, Any]:
     path = state_path(repo, "resolutions.json")
     previous = read_json(path, {"records": []})
-    previous_by_key = {item["key"]: item for item in previous.get("records", [])}
-    proposed: list[dict[str, Any]] = []
-    worktrees = registry["worktrees"]
-
-    for left_index, left in enumerate(worktrees):
-        left_paths = set(left["dirty_paths"])
-        if not left_paths:
-            continue
-        for right in worktrees[left_index + 1 :]:
-            overlap = sorted(left_paths.intersection(right["dirty_paths"]))
-            if not overlap:
-                continue
-            names = [left["path"], right["path"]]
-            key = resolution_key("overlapping-paths", names, overlap)
-            record = previous_by_key.get(key, {})
-            proposed.append(
-                {
-                    "id": record.get("id"),
-                    "key": key,
-                    "kind": "overlapping-paths",
-                    "worktrees": names,
-                    "paths": overlap,
-                    "snapshots": [snapshots.get(name, {}).get("snapshot_id") for name in names],
-                    "recommendation": "Review both snapshots and choose keep, adopt, combine, defer, or obsolete",
-                    "choice": record.get("choice"),
-                    "note": record.get("note"),
-                    "status": record.get("status", "needs-owner"),
-                    "created_at": record.get("created_at", utc_now()),
-                    "updated_at": utc_now(),
-                }
-            )
-
-    canonical = next(item for item in worktrees if item["canonical"])
-    for item in worktrees:
-        if item["canonical"] or not item["dirty"]:
-            continue
-        names = [canonical["path"], item["path"]]
-        key = resolution_key("unfinished-variant", names, item["dirty_paths"])
-        record = previous_by_key.get(key, {})
-        proposed.append(
-            {
-                "id": record.get("id"),
-                "key": key,
-                "kind": "unfinished-variant",
-                "worktrees": names,
-                "paths": item["dirty_paths"],
-                "snapshots": [snapshots.get(item["path"], {}).get("snapshot_id")],
-                "recommendation": "Integrate, defer, obsolete, or return this unfinished variant before stage closure",
-                "choice": record.get("choice"),
-                "note": record.get("note"),
-                "status": record.get("status", "needs-owner"),
-                "created_at": record.get("created_at", utc_now()),
-                "updated_at": utc_now(),
-            }
-        )
-
-    for item in worktrees:
-        if item["canonical"]:
-            continue
-        ahead = item["divergence"].get("ahead")
-        # Committed-but-unmerged work is a variant too; a clean worktree that is ahead
-        # of canonical must still receive an owner disposition. ahead=None means the
-        # histories could not be compared, which is treated as divergent.
-        if ahead is not None and ahead <= 0:
-            continue
-        names = [canonical["path"], item["path"]]
-        key = resolution_key("divergent-base", names, [])
-        record = previous_by_key.get(key, {})
-        snapshot_id = snapshots.get(item["path"], {}).get("snapshot_id")
-        proposed.append(
-            {
-                "id": record.get("id"),
-                "key": key,
-                "kind": "divergent-base",
-                "worktrees": names,
-                "paths": item["dirty_paths"],
-                "head": item.get("head"),
-                "branch": item.get("branch", "(detached)"),
-                "ahead": ahead,
-                "behind": item["divergence"].get("behind"),
-                "snapshots": [snapshot_id] if snapshot_id else [],
-                "recommendation": (
-                    f"Worktree is {'an unknown number of' if ahead is None else ahead} commit(s) ahead of canonical; "
-                    "commits are recoverable by ref. Integrate, defer, or mark obsolete after the owner selects canonical intent"
-                ),
-                "choice": record.get("choice"),
-                "note": record.get("note"),
-                "status": record.get("status", "needs-owner"),
-                "created_at": record.get("created_at", utc_now()),
-                "updated_at": utc_now(),
-            }
-        )
-
-    proposed_keys = {item["key"] for item in proposed}
-    for previous_record in previous.get("records", []):
-        if previous_record.get("key") in proposed_keys:
-            continue
-        carried = dict(previous_record)
-        if carried.get("status") in {"pending", "needs-owner"}:
-            # The variant no longer exists (integrated, cleaned or committed under a new
-            # key), so the disposition is complete. Snapshots remain on disk.
-            carried["status"] = "resolved"
-            carried["resolved_at"] = utc_now()
-            existing_note = (carried.get("note") or "").strip()
-            auto_note = "variant no longer present at reconcile"
-            carried["note"] = f"{existing_note} | {auto_note}" if existing_note else auto_note
-        carried["updated_at"] = utc_now()
-        proposed.append(carried)
-
+    previous_by_key = {item["key"]: item for item in previous.get("records", [])
+                       if not item.get("retired_at") and item.get("review_fingerprint")}
     used_ids = {
         int(match.group(1))
         for item in previous.get("records", [])
         if (match := re.fullmatch(r"R-(\d+)", str(item.get("id", ""))))
     }
     next_id = max(used_ids, default=0) + 1
-    for item in proposed:
-        if item["id"] is None:
-            item["id"] = f"R-{next_id:03d}"
+    proposed = []
+    candidates = proposed_resolutions(registry, snapshots)
+    # Legacy net patches did not record staged content or coverage. Preserve their
+    # bytes and decisions, but do not silently certify them under the new contract.
+    for manifest_path in sorted((state_dir(repo) / "snapshots").glob("*.json")):
+        legacy = read_json(manifest_path)
+        if legacy.get("snapshot_format") == 2:
+            continue
+        identifier = legacy.get("snapshot_id", manifest_path.stem)
+        names = [legacy.get("worktree", registry["canonical_worktree"])]
+        version = fingerprint(legacy)
+        scope = fingerprint(["incomplete-recovery", names])
+        candidates.append({"kind": "incomplete-recovery", "worktrees": names, "paths": legacy.get("dirty_paths", []),
+                           "snapshots": [identifier], "coverage_snapshot": identifier, "review_fingerprint": version,
+                           "scope_key": scope, "key": fingerprint([scope, version, identifier]),
+                           "recovery_gaps": [{"path": "(legacy snapshot)", "reason": "unverifiable-legacy-coverage"}],
+                           "recommendation": "Preserved legacy snapshot lacks staged-state coverage; identify an owner-attested backup"})
+    for candidate in candidates:
+        if candidate["key"] in previous_by_key:
+            # Keep the original review, including its snapshots and decision timestamps.
+            proposed.append(dict(previous_by_key[candidate["key"]]))
+        else:
+            proposed.append({**candidate, "id": f"R-{next_id:03d}", "choice": None, "note": None,
+                             "status": "needs-owner", "created_at": utc_now(), "updated_at": utc_now()})
             next_id += 1
+    retained = {item["id"] for item in proposed}
+    current_proposals = list(proposed)
+    available = {item["path"] for item in registry["worktrees"] if item["availability"] == "available"}
+    for old in previous.get("records", []):
+        if old["id"] in retained:
+            continue
+        carried = dict(old)
+        if not old.get("retired_at"):
+            replacements = [new for new in current_proposals if new.get("scope_key") == old.get("scope_key")
+                            or (old["kind"] in {"unfinished-variant", "divergent-base"}
+                                and new["kind"] in {"unfinished-variant", "divergent-base", "unavailable-worktree"}
+                                and old["worktrees"][-1] == new["worktrees"][-1])
+                            or (not old.get("review_fingerprint") and old["kind"] == new["kind"]
+                                and old["worktrees"] == new["worktrees"])]
+            carried["retired_at"] = utc_now()
+            carried["superseded_by"] = [new["id"] for new in replacements]
+            for new in replacements:
+                new.setdefault("supersedes", []).append(old["id"])
+            # An uncovered historical version stays a recovery obligation, even after deletion.
+            # Never interpret a changed key, unavailable tree, or unversioned legacy record as completed work.
+            gone = not replacements and all(name in available for name in old["worktrees"])
+            if gone and old.get("review_fingerprint") and old["kind"] != "incomplete-recovery":
+                if carried.get("status") in {"pending", "needs-owner"}:
+                    carried["status"] = "resolved"
+                    carried["resolved_at"] = utc_now()
+                    carried["note"] = ((carried.get("note") or "") + " | variant no longer present at reconcile").strip(" |")
+            carried["updated_at"] = utc_now()
+        proposed.append(carried)
     proposed.sort(key=lambda item: item["id"])
     result = {
         "schema_version": SCHEMA_VERSION,
@@ -861,8 +1087,62 @@ def unresolved_records(repo: Path) -> list[dict[str, Any]]:
     return [
         item
         for item in resolutions.get("records", [])
-        if item.get("status") not in {"resolved", "deferred", "obsolete"}
+        if (not item.get("retired_at") or item["kind"] == "incomplete-recovery")
+        and item.get("status") not in {"resolved", "deferred", "obsolete"}
     ]
+
+
+def alternative_recovery(repo: Path, value: str) -> dict[str, Any]:
+    backup = Path(value).expanduser().absolute()
+    backup = backup.parent.resolve() / backup.name
+    for item in parse_worktrees(repo):
+        if backup.resolve().is_relative_to(Path(item["path"]).resolve()):
+            raise GovernanceError("Alternative backup must be outside registered worktrees", EXIT_GATE)
+    state, _ = file_state(Path(backup.anchor), str(backup.relative_to(backup.anchor)))
+    if state.get("kind") != "file" or not state.get("size"):
+        raise GovernanceError("Alternative recovery requires an available, nonempty regular backup file (no symlinks)", EXIT_GATE)
+    return {"path": str(backup), "sha256": state["sha256"], "size": state["size"], "coverage_authority": "owner-attested"}
+
+
+def recovery_errors(repo: Path) -> list[str]:
+    errors = []
+    resolutions = read_json(state_path(repo, "resolutions.json"), {"records": []})
+    # Historical recovery evidence remains accountable; decisions never authorize deleting it.
+    for manifest_path in sorted((state_dir(repo) / "snapshots").glob("v2-*.json")):
+        if manifest_path.is_symlink():
+            errors.append(f"Snapshot manifest must not be a symlink: {manifest_path.name}")
+            continue
+        manifest = read_json(manifest_path)
+        errors.extend(snapshot_errors(repo, manifest))
+    for record in resolutions["records"]:
+        if record["kind"] == "incomplete-recovery" and record.get("status") in {"resolved", "deferred", "obsolete"}:
+            reference = record.get("alternative_recovery")
+            try:
+                actual = alternative_recovery(repo, reference["path"]) if reference else None
+            except (GovernanceError, OSError):
+                actual = None
+            if not reference or actual != reference:
+                errors.append(f"Missing or changed alternative recovery for {record['id']}")
+        if record["kind"] == "divergent-base" and record.get("review_fingerprint"):
+            if not check_recovery_ref(repo, record["head"]):
+                errors.append(f"Missing recovery commit for {record['id']}")
+        for identifier in record.get("snapshots", []):
+            if identifier and identifier.startswith("v2-") and not (state_dir(repo) / "snapshots" / f"{identifier}.json").is_file():
+                errors.append(f"Missing snapshot manifest for {record['id']}: {identifier}")
+    return errors
+
+
+def capture_inventory(repo: Path, registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    snapshots = {}
+    for item in registry["worktrees"]:
+        if item["availability"] != "available":
+            continue
+        if item["dirty"]:
+            snapshots[item["path"]] = snapshot_worktree(repo, item)
+        if not item["canonical"] and item["divergence"].get("ahead") != 0:
+            pin_head(repo, item["head"])
+    registry["snapshot_ids"] = [snapshot["snapshot_id"] for snapshot in snapshots.values()]
+    return snapshots
 
 
 # Shared template-placeholder detector. Keep byte-identical with the copies in
@@ -926,8 +1206,9 @@ def validate_generated_docs(root: Path) -> list[str]:
 def command_doctor(repo: Path) -> dict[str, Any]:
     root = repository_root(repo)
     config = load_config(repo)
-    canonical = read_json(canonical_state_path(repo))
+    canonical = load_canonical(repo) if config else None
     return {
+        **policy.evaluate_policy(root),
         "ok": True,
         "python": sys.version.split()[0],
         "git": git(repo, "--version"),
@@ -966,6 +1247,7 @@ def command_status(repo: Path) -> dict[str, Any]:
     registry = read_json(state_path(repo, "registry.json"))
     resolutions = read_json(state_path(repo, "resolutions.json"), {"records": []})
     return {
+        **policy.evaluate_policy(repository_root(repo)),
         "configured": config is not None,
         "enabled": bool(config and config.get("enabled")),
         "hooks_enabled": bool(config and config.get("hooks_enabled")),
@@ -990,6 +1272,7 @@ def command_status(repo: Path) -> dict[str, Any]:
 def command_discover(repo: Path) -> dict[str, Any]:
     with state_lock(repo):
         ensure_config(repo)
+        initialize_canonical(repo)
         registry = inventory(repo)
         packet = discovery_packet(repo, registry)
         atomic_write_json(state_path(repo, "registry.json"), registry)
@@ -1009,10 +1292,7 @@ def command_reconcile(repo: Path) -> dict[str, Any]:
     with state_lock(repo):
         load_config(repo, required=True)
         registry = inventory(repo)
-        snapshots: dict[str, dict[str, Any]] = {}
-        for item in registry["worktrees"]:
-            if item["dirty"]:
-                snapshots[item["path"]] = snapshot_worktree(repo, item)
+        snapshots = capture_inventory(repo, registry)
         atomic_write_json(state_path(repo, "registry.json"), registry)
         resolutions = build_resolutions(repo, registry, snapshots)
         run = start_or_refresh_run(repo, registry)
@@ -1027,14 +1307,18 @@ def command_reconcile(repo: Path) -> dict[str, Any]:
             run["next_action"] = "Ratify blocking intent and author canonical decisions"
         atomic_write_json(state_path(repo, "run-state.json"), run)
     return {
-        "snapshots_created": len(snapshots),
+        "snapshots_created": sum(1 for item in snapshots.values() if item["_created"]),
+        "snapshots_reused": sum(1 for item in snapshots.values() if not item["_created"]),
+        "incomplete_snapshots": sum(1 for item in snapshots.values() if item["coverage"]["status"] != "complete"),
+        "unavailable_worktrees": sum(1 for item in registry["worktrees"] if item["availability"] != "available"),
+        "recovery_errors": recovery_errors(repo),
         "resolution_count": len(resolutions["records"]),
         "unresolved": len(unresolved_records(repo)),
         "resolution_file": str(state_path(repo, "resolutions.json")),
     }
 
 
-def command_resolve(repo: Path, record_id: str, choice: str, note: str) -> dict[str, Any]:
+def command_resolve(repo: Path, record_id: str, choice: str, note: str, recovery_reference: str | None = None) -> dict[str, Any]:
     allowed = {"keep-canonical", "adopt", "combine", "defer", "obsolete", "return-to-agent"}
     if choice not in allowed:
         raise GovernanceError(f"Unsupported resolution choice: {choice}", EXIT_USAGE)
@@ -1046,6 +1330,31 @@ def command_resolve(repo: Path, record_id: str, choice: str, note: str) -> dict[
         target = next((item for item in resolutions["records"] if item.get("id") == record_id), None)
         if target is None:
             raise GovernanceError(f"Unknown resolution ID: {record_id}", EXIT_USAGE)
+        if target["kind"] == "unavailable-worktree":
+            raise GovernanceError("Restore the unavailable worktree and reconcile; its unknown content cannot be waived", EXIT_GATE)
+        fresh = inventory(repo)
+        if target["kind"] != "incomplete-recovery":
+            if any(not item.get("content_verifiable", True) for item in fresh["worktrees"] if item["path"] in target["worktrees"]):
+                raise GovernanceError("Current content cannot be fingerprinted; restore readable supported files and reconcile", EXIT_GATE)
+            if (target.get("retired_at") or not target.get("review_fingerprint")
+                    or resolution_version(target, fresh) != target["review_fingerprint"]):
+                raise GovernanceError("Reviewed content changed or record is historical; reconcile and review the current version", EXIT_GATE)
+        reference = target.get("alternative_recovery")
+        if recovery_reference:
+            if target["kind"] != "incomplete-recovery":
+                raise GovernanceError("Use --recovery-ref on the incomplete-recovery record", EXIT_USAGE)
+            reference = alternative_recovery(repo, recovery_reference)
+        if target["kind"] == "incomplete-recovery" and choice in {"keep-canonical", "defer", "obsolete"}:
+            if not reference or alternative_recovery(repo, reference["path"]) != reference:
+                raise GovernanceError("Incomplete recovery requires --recovery-ref to an owner-attested backup file", EXIT_GATE)
+        if (target.get("choice") == choice and target.get("note") == note.strip()
+                and target.get("alternative_recovery") == reference):
+            return {"id": record_id, "choice": choice, "status": target["status"]}
+        if target.get("choice"):
+            target.setdefault("decision_history", []).append({key: target.get(key) for key in
+                ("choice", "note", "status", "resolved_at", "updated_at", "alternative_recovery")})
+        if reference:
+            target["alternative_recovery"] = reference
         target["choice"] = choice
         target["note"] = note.strip()
         # adopt/combine/return-to-agent describe work that still has to happen; they stay
@@ -1069,7 +1378,7 @@ def command_resolve(repo: Path, record_id: str, choice: str, note: str) -> dict[
     return {"id": record_id, "choice": choice, "status": target["status"]}
 
 
-def command_validate(repo: Path) -> dict[str, Any]:
+def command_validate(repo: Path, requested_policy: str = "auto") -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
     config = load_config(repo, required=True)
@@ -1088,52 +1397,212 @@ def command_validate(repo: Path) -> dict[str, Any]:
             live_head = current_head(canonical)
             if live_head != registry.get("canonical_head"):
                 errors.append("Canonical HEAD changed after the last inventory")
-        errors.extend(validate_generated_docs(canonical))
-        docs = canonical / "docs"
-        planning_started = (docs / "waves" / "README.md").exists()
-        specification_started = (
-            any(docs.glob("*-FSD.md")) or any(docs.glob("*-TSD.md")) or planning_started
+        artifact_errors, artifact_warnings = validate_artifacts(
+            canonical, str(config.get("project_slug") or canonical.name), requested_policy
         )
-        if specification_started:
-            project_slug = str(config.get("project_slug") or canonical.name)
-            spec_arguments = ["--repo", str(canonical), "--project", project_slug]
-            spec_errors, spec_warnings = run_sibling_validator(
-                "spec-chain",
-                "validate_spec.py",
-                [*spec_arguments, "--mode", "governance"],
-                canonical,
-                "Specification",
-            )
-            errors.extend(spec_errors)
-            warnings.extend(spec_warnings)
-            # Backward explainability: every accepted F and T must reach a user and an outcome.
-            trace_errors, _ = run_sibling_validator(
-                "spec-chain",
-                "trace_chain.py",
-                spec_arguments,
-                canonical,
-                "Trace",
-                error_key="breaks",
-            )
-            errors.extend(trace_errors)
-        if planning_started:
-            plan_errors, plan_warnings = run_sibling_validator(
-                "plan-waves-slices",
-                "validate_plan.py",
-                ["--repo", str(canonical), "--mode", "governance"],
-                canonical,
-                "Planning",
-            )
-            errors.extend(plan_errors)
-            warnings.extend(plan_warnings)
+        errors.extend(artifact_errors)
+        warnings.extend(artifact_warnings)
+        fresh = inventory(repo)
+        for item in fresh["worktrees"]:
+            if item["availability"] != "available" or not item.get("content_verifiable", True):
+                errors.append(f"Worktree content is unavailable or unverifiable: {item['path']}")
+        resolutions = read_json(state_path(repo, "resolutions.json"), {"records": []})
+        for record in resolutions["records"]:
+            if not record.get("retired_at") and record["kind"] not in {"incomplete-recovery", "unavailable-worktree"}:
+                if record.get("review_fingerprint") and resolution_version(record, fresh) != record["review_fingerprint"]:
+                    errors.append(f"Reviewed content changed for {record['id']}; reconcile")
+        for identifier in registry.get("snapshot_ids", []):
+            if not (state_dir(repo) / "snapshots" / f"{identifier}.json").is_file():
+                errors.append(f"Missing current snapshot manifest: {identifier}")
+    errors.extend(recovery_errors(repo))
     unresolved = unresolved_records(repo)
+    policy_result = policy.evaluate_policy(repository_root(repo), requested=requested_policy)
+    stage = stages.inspect(sys.modules[__name__], repo, policy_result["policy_version"] == policy.CURRENT_POLICY)
+    stage_errors = [f"[{d['code']}] {d['message']}" for d in stage["diagnostics"]]
+    errors.extend(stage_errors)
+    artifact_valid = not [error for error in errors if not any(
+        error == message or error.endswith(": " + message) for message in policy_result["policy_errors"])]
+    errors.extend(policy_result["policy_errors"])
     return {
+        **policy_result,
+        "artifact_valid": artifact_valid,
+        "stage": stage,
+        "stage_valid": stage["valid"],
+        "stage_errors": stage_errors,
         "valid": not errors,
         "errors": errors,
         "warnings": warnings,
         "unresolved_resolution_count": len(unresolved),
         "unresolved_resolution_ids": [item["id"] for item in unresolved],
     }
+
+
+def validate_artifacts(root: Path, project_slug: str, requested_policy: str = "auto") -> tuple[list[str], list[str]]:
+    """Inspect artifacts independently of machine-local initialization."""
+    errors = validate_generated_docs(root)
+    warnings: list[str] = []
+    docs = root / "docs"
+    planning_started = (docs / "waves" / "README.md").exists()
+    specification_started = any(docs.glob("*-FSD.md")) or any(docs.glob("*-TSD.md")) or planning_started
+    if specification_started:
+        spec_arguments = ["--repo", str(root), "--project", project_slug, "--policy", requested_policy]
+        spec_errors, spec_warnings = run_sibling_validator(
+            "spec-chain", "validate_spec.py", [*spec_arguments, "--mode", "governance"], root, "Specification"
+        )
+        errors.extend(spec_errors)
+        warnings.extend(spec_warnings)
+        trace_errors, _ = run_sibling_validator(
+            "spec-chain", "trace_chain.py", spec_arguments, root, "Trace", error_key="breaks"
+        )
+        errors.extend(trace_errors)
+    if planning_started:
+        plan_errors, plan_warnings = run_sibling_validator(
+            "plan-waves-slices", "validate_plan.py", ["--repo", str(root), "--mode", "governance", "--policy", requested_policy], root, "Planning"
+        )
+        errors.extend(plan_errors)
+        warnings.extend(plan_warnings)
+    return errors, warnings
+
+
+def command_audit(repo: Path) -> dict[str, Any]:
+    """Fresh read-only inspection, not discovery, reconciliation or acceptance."""
+    root = repository_root(repo)
+    policy_result = policy.evaluate_policy(root)
+    errors = list(policy_result["policy_errors"])
+    warnings: list[str] = []
+    config = None
+    fresh = None
+    validation = None
+    try:
+        config = load_config(repo)
+        fresh = inventory(repo)
+        canonical = Path(fresh["canonical_worktree"])
+        if config:
+            artifact_errors, artifact_warnings = validate_artifacts(
+                canonical, str(config.get("project_slug") or canonical.name)
+            )
+            errors.extend(artifact_errors)
+            warnings.extend(artifact_warnings)
+            if state_path(repo, "run-state.json").exists():
+                validation = command_validate(repo)
+                errors.extend(validation["errors"])
+                warnings.extend(validation["warnings"])
+            else:
+                errors.extend(recovery_errors(repo))
+                warnings.append("No local run state; audit does not initialize it or establish completion")
+        else:
+            warnings.append("Governance is not initialized; no governed artifact set has been selected")
+        for item in fresh["worktrees"]:
+            if item["availability"] != "available":
+                errors.append(f"Worktree is unavailable: {item['path']}")
+        if config and config["schema_version"] in LEGACY_SCHEMA_VERSIONS:
+            warnings.append("Legacy schema 2 is read without identity migration; use upgrade explicitly")
+        unresolved = unresolved_records(repo)
+        if unresolved:
+            warnings.append("Unresolved worktree dispositions remain; audit does not reconcile them")
+    except (GovernanceError, OSError) as exc:
+        errors.append(str(exc))
+        unresolved = []
+    return {
+        **policy_result,
+        "valid": not errors,
+        "errors": list(dict.fromkeys(errors)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "configured": config is not None,
+        "config_schema": config.get("schema_version") if config else None,
+        "inventory": fresh,
+        "runtime_validation": validation,
+        "unresolved_resolution_ids": [item["id"] for item in unresolved],
+        "acceptance_checked": False,
+        "read_only": True,
+    }
+
+
+def command_upgrade(repo: Path, *, apply: bool, target_policy: str) -> dict[str, Any]:
+    """Explicit metadata upgrade. Never fabricate missing approval/evidence."""
+    audit = command_audit(repo)
+    target = policy.CURRENT_POLICY if target_policy == "current" else policy.LEGACY_POLICY
+    blockers: list[str] = []
+    for path in (config_path(repo), config_path(repo).parent, canonical_state_path(repo),
+                 state_dir(repo), state_dir(repo) / "upgrades"):
+        if path.is_symlink():
+            blockers.append(f"Metadata upgrade refuses a symlink target; resolve ownership first: {path}")
+    try:
+        config = load_config(repo, required=True)
+    except GovernanceError as exc:
+        config = None
+        blockers.append(str(exc))
+    if target == policy.CURRENT_POLICY and not policy.CURRENT_POLICY_READY:
+        blockers.append("Current policy 2 is not released; finish enforcement and migration gates before adoption")
+    if config and target < config.get("policy_version", policy.LEGACY_POLICY):
+        blockers.append("Upgrade cannot downgrade an existing project policy")
+    if target == policy.CURRENT_POLICY:
+        blockers.extend(audit["errors"])
+    changed = bool(config and (config["schema_version"] != SCHEMA_VERSION or config.get("policy_version") != target))
+    changes = []
+    if config and config["schema_version"] != SCHEMA_VERSION:
+        changes.append("Migrate owned config identity fields to schema 3; preserve local canonical selection")
+    if config and config.get("policy_version") != target:
+        changes.append(f"Record explicit policy_version {target}")
+    result = {
+        "valid": not blockers,
+        "errors": list(dict.fromkeys(blockers)),
+        "warnings": audit["warnings"],
+        "audit": audit,
+        "target_policy_version": target,
+        "changes": changes,
+        "applied": False,
+        "changed": False,
+        "read_only": not apply,
+    }
+    if not apply or blockers:
+        if blockers:
+            result["read_only"] = True
+        return result
+    if not changed:
+        result.update(applied=True, read_only=True)
+        return result
+    assert config is not None
+    before_config = config_path(repo).read_bytes()
+    before_config_mode = config_path(repo).stat().st_mode & 0o777
+    if json.loads(before_config) != config:
+        raise GovernanceError("Governance config changed during upgrade; preview again", EXIT_GATE)
+    before_canonical = canonical_state_path(repo).read_bytes() if canonical_state_path(repo).exists() else None
+    canonical = load_canonical(repo)
+    upgraded = dict(config)
+    upgraded.update(schema_version=SCHEMA_VERSION, policy_version=target, suite_version=SUITE_VERSION,
+                    repository_id=repo_identity(repo), migrated_at=utc_now())
+    if config["schema_version"] in LEGACY_SCHEMA_VERSIONS:
+        upgraded.pop("canonical_worktree", None)
+        upgraded.pop("canonical_branch", None)
+        upgraded.setdefault("project_slug", default_project_slug(repo))
+    # Snapshot exact original bytes, including unknown project extensions. The hash
+    # names one migration input, not a mutable 'latest backup'.
+    identity = hashlib.sha256(before_config + b"\0" + (before_canonical or b"")).hexdigest()
+    backup = state_dir(repo) / "upgrades" / identity
+    with state_lock(repo):
+        live_canonical = canonical_state_path(repo).read_bytes() if canonical_state_path(repo).exists() else None
+        if (config_path(repo).read_bytes() != before_config or live_canonical != before_canonical
+                or config_path(repo).stat().st_mode & 0o777 != before_config_mode):
+            raise GovernanceError("Governance metadata changed during upgrade; preview again", EXIT_GATE)
+        if backup.exists() or backup.is_symlink():
+            raise GovernanceError(f"Migration backup already exists; inspect recovery before retrying: {backup}", EXIT_GATE)
+        atomic_write_bytes(backup / "config.json", before_config)
+        if before_canonical is not None:
+            atomic_write_bytes(backup / "canonical.json", before_canonical)
+        atomic_write_json(backup / "manifest.json", {
+            "created_at": utc_now(), "config_schema_before": config["schema_version"],
+            "policy_version_before": config.get("policy_version", policy.LEGACY_POLICY),
+            "target_policy_version": target, "canonical_existed": before_canonical is not None,
+            "config_sha256": hashlib.sha256(before_config).hexdigest(),
+            "config_mode": before_config_mode,
+            "canonical_sha256": hashlib.sha256(before_canonical).hexdigest() if before_canonical is not None else None,
+        })
+        if before_canonical is None and config["schema_version"] in LEGACY_SCHEMA_VERSIONS:
+            atomic_write_json(canonical_state_path(repo), canonical)
+        atomic_write_json(config_path(repo), upgraded, mode=before_config_mode)
+    result.update(applied=True, changed=True, backup=str(backup))
+    return result
 
 
 def run_sibling_validator(
@@ -1179,17 +1648,26 @@ def command_resume(repo: Path) -> dict[str, Any]:
     }
 
 
-def command_close_stage(repo: Path, approved: bool) -> dict[str, Any]:
+def command_close_stage(repo: Path, approved: bool, approval_reference: str | None = None) -> dict[str, Any]:
     if not approved:
         raise GovernanceError("Stage closure requires explicit --owner-approved", EXIT_GATE)
     with state_lock(repo):
         load_config(repo, required=True)
+        run = read_json(state_path(repo, "run-state.json"))
+        if run and run.get("stage_required") and run.get("status") == "closed":
+            return {"closed": True, "already_closed": True, "run_id": run["run_id"],
+                    "stage_completion": run.get("stage_completion")}
+        close_approval = None
+        if run and (run.get("stage_required") or run.get("stage_id")):
+            if not approval_reference:
+                raise GovernanceError("Stage closure requires --approval-ref to the owner's sign-off record", EXIT_GATE)
+            try:
+                close_approval = stages.approval_record(sys.modules[__name__], repo, approval_reference)
+            except (OSError, ValueError) as exc:
+                raise GovernanceError(str(exc), EXIT_GATE) from exc
         fresh = inventory(repo)
+        snapshots = capture_inventory(repo, fresh)
         atomic_write_json(state_path(repo, "registry.json"), fresh)
-        snapshots: dict[str, dict[str, Any]] = {}
-        for item in fresh["worktrees"]:
-            if item["dirty"]:
-                snapshots[item["path"]] = snapshot_worktree(repo, item)
         # Rebuild from the fresh inventory so closure reflects worktrees dirtied since the
         # last reconcile and auto-resolves pending variants that have since been cleaned.
         build_resolutions(repo, fresh, snapshots)
@@ -1199,9 +1677,32 @@ def command_close_stage(repo: Path, approved: bool) -> dict[str, Any]:
             blockers.append("Unresolved worktree resolution records remain")
         if blockers:
             raise GovernanceError("; ".join(blockers), EXIT_GATE)
+        after = inventory(repo)
+        before_versions = {item["path"]: item["content_fingerprint"] for item in fresh["worktrees"]}
+        after_versions = {item["path"]: item["content_fingerprint"] for item in after["worktrees"]}
+        if before_versions != after_versions:
+            raise GovernanceError("Worktree changed while closing the stage; reconcile again", EXIT_GATE)
         run = read_json(state_path(repo, "run-state.json"))
         if run is None:
             raise GovernanceError("No active run to close", EXIT_VALIDATION)
+        if close_approval is not None:
+            final_stage = stages.inspect(sys.modules[__name__], repo, True)
+            if not final_stage["valid"]:
+                raise GovernanceError("; ".join(d["message"] for d in final_stage["diagnostics"]), EXIT_GATE)
+            if stages.approval_record(sys.modules[__name__], repo, approval_reference) != close_approval:
+                raise GovernanceError("Owner sign-off changed during closure", EXIT_GATE)
+            completion = {"stage_id": run["stage_id"], "contract_sha256": run["stage_contract_sha256"],
+                          "subject": final_stage["subject"], "evidence": final_stage["evidence"],
+                          "owner_approval": close_approval, "closed_at": utc_now()}
+            directory, _ = stages.load_stage(sys.modules[__name__], repo, run)
+            previous = read_json(directory / "closure.json")
+            if previous:
+                if any(previous.get(key) != completion[key] for key in completion if key != "closed_at"):
+                    raise GovernanceError("Interrupted closure record differs; inspect it before retrying", EXIT_GATE)
+                completion = previous
+            else:
+                stages.publish(sys.modules[__name__], directory / "closure.json", completion)
+            run["stage_completion"] = completion
         run.update(
             {
                 "status": "closed",
@@ -1213,6 +1714,13 @@ def command_close_stage(repo: Path, approved: bool) -> dict[str, Any]:
         )
         atomic_write_json(state_path(repo, "run-state.json"), run)
     return {"closed": True, "run_id": run["run_id"], "canonical_head": fresh["canonical_head"]}
+
+
+def command_check_stage(repo: Path, requested_policy: str = "auto") -> dict[str, Any]:
+    selected = policy.evaluate_policy(repository_root(repo), requested=requested_policy)
+    report = stages.inspect(sys.modules[__name__], repo, selected["policy_version"] == policy.CURRENT_POLICY)
+    return {**selected, "stage": report, "stage_valid": report["valid"],
+            "valid": report["valid"] and not selected["policy_errors"]}
 
 
 def find_skill_root() -> Path:
@@ -1345,7 +1853,9 @@ def neutral_hook_decision(repo: Path, event: str, payload: dict[str, Any]) -> di
         return {"permission": "allow", "reason": "governance-disabled"}
     if event in {"subagent-stop", "session-end"}:
         try:
-            command_reconcile(repo)
+            result = command_reconcile(repo)
+            if result["incomplete_snapshots"] or result["unavailable_worktrees"] or result["recovery_errors"]:
+                return {"permission": "allow", "reason": "snapshot-warning: recovery is incomplete; inspect resolutions before closure"}
             return {"permission": "allow", "reason": "unfinished-work-snapshotted"}
         except GovernanceError as exc:
             return {"permission": "allow", "reason": f"snapshot-warning: {exc}"}
@@ -1447,8 +1957,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo", default=".", help="Path to a Git worktree")
     parser.add_argument("--json", action="store_true", help="Emit one JSON object")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ["doctor", "status", "discover", "reconcile", "validate", "resume", "install-hooks"]:
+    for name in ["doctor", "status", "audit", "discover", "reconcile", "resume", "install-hooks"]:
         subparsers.add_parser(name)
+    for name in ["validate", "check-stage"]:
+        subparsers.add_parser(name).add_argument("--policy", choices=["auto", "legacy", "current"], default="auto")
+    freeze_parser = subparsers.add_parser("freeze-stage")
+    freeze_parser.add_argument("--contract", required=True)
+    freeze_parser.add_argument("--owner-approved", action="store_true")
+    freeze_parser.add_argument("--approval-ref", required=True)
+    check_parser = subparsers.add_parser("run-check")
+    check_parser.add_argument("--id", required=True)
+    cancel_parser = subparsers.add_parser("cancel-stage")
+    cancel_parser.add_argument("--owner-approved", action="store_true")
+    cancel_parser.add_argument("--approval-ref", required=True)
+    cancel_parser.add_argument("--reason", required=True)
+    resolve_note_parser = subparsers.add_parser("resolve-note")
+    resolve_note_parser.add_argument("--id", required=True)
+    resolve_note_parser.add_argument("--decision", required=True)
+    resolve_note_parser.add_argument("--note", required=True)
+    resolve_note_parser.add_argument("--owner-approved", action="store_true")
+    upgrade_parser = subparsers.add_parser("upgrade")
+    upgrade_action = upgrade_parser.add_mutually_exclusive_group(required=True)
+    upgrade_action.add_argument("--dry-run", action="store_true")
+    upgrade_action.add_argument("--apply", action="store_true")
+    upgrade_parser.add_argument("--policy", choices=["legacy", "current"], default="current")
     resolve_parser = subparsers.add_parser("resolve")
     resolve_parser.add_argument("--id", required=True, dest="record_id")
     resolve_parser.add_argument(
@@ -1457,8 +1989,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["keep-canonical", "adopt", "combine", "defer", "obsolete", "return-to-agent"],
     )
     resolve_parser.add_argument("--note", required=True)
+    resolve_parser.add_argument("--recovery-ref", dest="recovery_reference", help="Owner-attested local backup file for incomplete recovery")
     close_parser = subparsers.add_parser("close-stage")
     close_parser.add_argument("--owner-approved", action="store_true")
+    close_parser.add_argument("--approval-ref", dest="approval_reference")
     canonical_parser = subparsers.add_parser("set-canonical")
     canonical_parser.add_argument("--path", required=True, dest="canonical_path")
     note_parser = subparsers.add_parser("note")
@@ -1491,16 +2025,27 @@ def main() -> int:
     args = parser.parse_args()
     try:
         repo = resolve_repo(args.repo)
+        if args.command not in {"doctor", "status", "audit", "validate", "resume", "upgrade", "check-stage"}:
+            readiness = policy.evaluate_policy(repository_root(repo))
+            if readiness["policy_errors"]:
+                raise GovernanceError("; ".join(readiness["policy_errors"]), EXIT_GATE)
         handlers = {
             "doctor": lambda: command_doctor(repo),
             "status": lambda: command_status(repo),
+            "audit": lambda: command_audit(repo),
+            "upgrade": lambda: command_upgrade(repo, apply=args.apply, target_policy=args.policy),
             "discover": lambda: command_discover(repo),
             "reconcile": lambda: command_reconcile(repo),
-            "validate": lambda: command_validate(repo),
+            "validate": lambda: command_validate(repo, args.policy),
+            "check-stage": lambda: command_check_stage(repo, args.policy),
+            "freeze-stage": lambda: stages.freeze(sys.modules[__name__], repo, args.contract, args.owner_approved, args.approval_ref),
+            "run-check": lambda: stages.run_check(sys.modules[__name__], repo, args.id),
+            "cancel-stage": lambda: stages.cancel(sys.modules[__name__], repo, args.owner_approved, args.approval_ref, args.reason),
+            "resolve-note": lambda: stages.resolve_note(sys.modules[__name__], repo, args.id, args.decision, args.note, args.owner_approved),
             "resume": lambda: command_resume(repo),
             "install-hooks": lambda: command_install_hooks(repo),
-            "resolve": lambda: command_resolve(repo, args.record_id, args.choice, args.note),
-            "close-stage": lambda: command_close_stage(repo, args.owner_approved),
+            "resolve": lambda: command_resolve(repo, args.record_id, args.choice, args.note, args.recovery_reference),
+            "close-stage": lambda: command_close_stage(repo, args.owner_approved, args.approval_reference),
             "set-canonical": lambda: command_set_canonical(repo, args.canonical_path),
             "note": lambda: command_note(
                 repo, args.kind, args.text, args.evidence, args.provenance, args.evidence_class
@@ -1510,17 +2055,22 @@ def main() -> int:
         }
         result = handlers[args.command]()
         render_result(result, args.json)
-        if args.command == "validate" and not result["valid"]:
+        if args.command in {"validate", "audit", "check-stage"} and not result["valid"]:
             return EXIT_VALIDATION
-        if args.command == "reconcile" and result["unresolved"]:
+        if args.command == "run-check" and not result["passed"]:
+            return EXIT_VALIDATION
+        if args.command == "upgrade" and not result["valid"]:
+            return EXIT_GATE
+        if args.command == "reconcile" and (result["unresolved"] or result["recovery_errors"]):
             return EXIT_GATE
         return 0
-    except GovernanceError as exc:
+    except (GovernanceError, OSError, ValueError) as exc:
+        exit_code = exc.exit_code if isinstance(exc, GovernanceError) else EXIT_GATE if isinstance(exc, ValueError) else EXIT_VALIDATION
         if args.json:
-            print(json.dumps({"error": str(exc), "exit_code": exc.exit_code}, sort_keys=True))
+            print(json.dumps({"error": str(exc), "exit_code": exit_code}, sort_keys=True))
         else:
             print(f"error: {exc}", file=sys.stderr)
-        return exc.exit_code
+        return exit_code
 
 
 if __name__ == "__main__":

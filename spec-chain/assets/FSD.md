@@ -1,5 +1,6 @@
 ---
 document_type: FSD
+policy_version: 1
 authority: behavior
 status: draft
 project: <project-slug>

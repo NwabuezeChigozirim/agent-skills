@@ -20,7 +20,9 @@ SKILLS = ["governance-system", "plan-waves-slices", "spec-chain"]
 # Files whose absence makes the suite structurally invalid, per skill. The need-first
 # philosophy is stated once in spec-chain and cited by the other two packages.
 REQUIRED_FILES: dict[str, list[str]] = {
-    "spec-chain": ["references/need-first.md"],
+    "spec-chain": ["references/need-first.md", "scripts/specification_graph.py"],
+    "governance-system": ["scripts/engineering_policy.py", "scripts/artifact_contracts.py", "scripts/stage_contracts.py"],
+    "plan-waves-slices": ["scripts/planning_graph.py"],
 }
 
 

@@ -3,6 +3,19 @@
 `governancectl` is the single operational entry point. It does not merge, reset, stash,
 delete or overwrite worktree changes.
 
+## Audit or upgrade an existing project
+
+```bash
+governancectl --repo /path/to/repository audit
+governancectl --repo /path/to/repository upgrade --dry-run
+```
+
+Inspection never initializes state or migrates old config. Policy 2 is not released,
+so current-policy adoption remains gated. An explicitly requested metadata-only
+upgrade can retain legacy policy with `upgrade --apply --policy legacy`. See
+[policy compatibility](references/policy-compatibility.md) for backups, selection and
+the difference between storage migration and engineering acceptance.
+
 ## Start or resume
 
 ```bash
@@ -62,6 +75,18 @@ Choices are `keep-canonical`, `adopt`, `combine`, `defer`, `obsolete`, and
 `adopt`, `combine` and `return-to-agent` leave the record `pending` until a later
 `reconcile` or `close-stage` finds the variant gone; until then the stage cannot close.
 
+Dispositions bind the version reviewed. Changed content needs a fresh R-ID; unchanged
+scans preserve prior choices. A changed/committed variant supersedes a pending record,
+not evidence of completed integration. Earlier snapshots and choices remain intact.
+
+`incomplete-recovery` means excluded or uncaptured data still needs a backup. On that
+R-ID only, supply `--recovery-ref /separate-backups/version.enc` with a note explicitly
+attesting coverage. The file must exist, be nonempty and outside registered worktrees.
+The runtime checks its hash and availability, not its semantic completeness. Do not
+use a generic “backed up” note as evidence. An unavailable worktree or unidentifiable
+current version cannot be waived; restore access and reconcile. See
+[the recovery contract](references/recovery.md) before manual restoration.
+
 ## Hooks
 
 ```bash
@@ -106,6 +131,11 @@ delivery. Client profile rejects TSD and obvious implementation detail.
 
 ## Validate and close
 
+The commands below preserve the default legacy lifecycle. For stronger completion
+gates, explicitly opt the active run into a frozen stage contract after owner review;
+read [stage contracts](references/stage-contracts.md) first. This is not policy-2
+activation and is not a new specification or plan.
+
 ```bash
 python3 ~/.local/share/agent-skills/spec-chain/scripts/validate_spec.py \
   --repo /path/to/repository --project project-slug --mode governance
@@ -122,13 +152,37 @@ supplied speculatively.
 specifications or `docs/waves/` exist, so the last two commands are sufficient after
 the documents are in place.
 
+For an explicitly contracted run, the operational sequence is:
+
+```bash
+governancectl --repo /path/to/repository freeze-stage --contract docs/stage.json \
+  --owner-approved --approval-ref /owner-records/stage-start.txt
+governancectl --repo /path/to/repository run-check --id CHK-001
+governancectl --repo /path/to/repository check-stage
+governancectl --repo /path/to/repository validate
+governancectl --repo /path/to/repository close-stage --owner-approved \
+  --approval-ref /owner-records/stage-signoff.txt
+```
+
+Run every required check, not just the example ID. The last command records actual
+owner sign-off after review. Read-only `check-stage --policy current` previews the
+required gate without enabling policy 2. Missing/stale/failed evidence and unresolved
+blocking/needs-owner findings cannot be waived with an owner flag. An external local
+approval record avoids changing the tested repository merely to record sign-off.
+
 ## State and privacy
 
 - Committed activation: `.governance/config.json` (schema 3; no absolute paths)
 - Shared machine-local state: `<git-common-dir>/governance/` including
   `canonical.json` and `discovery-notes.json`
 - Snapshot files are mode 0600.
-- Sensitive untracked paths such as `.env`, credentials and SSH keys are listed as
-  excluded but their contents are never copied into snapshots or command output.
+- Stage contracts, attempts, combined command logs and closure receipts are also private
+  machine-local records. Command logs may contain secrets; review the commands before
+  running them. There is no automatic redaction, pruning or remote evidence backup.
+- Recognized sensitive dirty paths are excluded from new payloads and reported as
+  incomplete coverage. Arbitrarily named secrets are not detected; raw working/index
+  snapshots are private recovery data, not a substitute for secret scanning.
+- Base commits are retained under `refs/governance/snapshots/`. There is no automatic
+  pruning or remote backup, and the runtime never pushes these refs.
 - Remote uncommitted work is invisible locally and requires a commit, patch or
   equivalent recoverable artifact.
