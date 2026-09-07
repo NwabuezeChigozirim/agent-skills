@@ -32,6 +32,10 @@ Each mutable concern has exactly one authoritative owner.
 7. Operational map and onboarding.
 
 The order prevents wave briefs from citing specifications that do not yet exist.
+It is the initial construction order, not an irreversible lifecycle. New evidence may
+re-enter an earlier owning activity; review its downstream consumers without regenerating
+unaffected artifacts. Frozen impact baselines and revision receipts preserve historical
+agreement, not a competing mutable source. See [controlled-iteration.md](controlled-iteration.md).
 
 ## Mutable-state rule
 

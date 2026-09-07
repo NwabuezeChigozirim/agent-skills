@@ -23,6 +23,11 @@ system or duplicate discovery supplied by `governance-system`.
 
 Read [references/governance-mode.md](references/governance-mode.md) for the input and
 direct-output contract.
+For revised inputs in a governed stage, read
+[controlled iteration](../governance-system/references/controlled-iteration.md).
+Review affected slices, dependencies and exit criteria against the revised validated
+specifications. Preserve stable slice IDs and unaffected decisions; send specification
+defects upstream. Impact is a review request, not automatic replanning or approval.
 
 ## Planning workflow
 
@@ -111,6 +116,8 @@ python3 scripts/validate_plan.py --repo <repository> --mode <standalone-or-gover
 Repair validation errors, summarize the wave count and open items, and stop. Planning
 never authorizes implementation. Wave 1 remains gated until the owner explicitly says
 “go.”
+On revision, newly proposed or reopened work needs fresh approval; do not reset every
+unaffected wave or carry stale sign-off forward merely because its ID is unchanged.
 
 ## Failure policy
 

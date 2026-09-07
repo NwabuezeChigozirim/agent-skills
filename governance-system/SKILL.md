@@ -49,6 +49,10 @@ For an explicitly opted-in stage contract, read
 begins. Freeze the approved scope, inputs and checks first; governance does not re-plan.
 `phase` is progress state, not completion. Policy-1 runs without opt-in retain legacy
 behavior; policy 2 remains unreleased.
+When new evidence changes that agreement, read
+[references/controlled-iteration.md](references/controlled-iteration.md). Use read-only
+impact analysis and owner-reviewed revision, not wholesale regeneration or silent
+scope change. Completed work requires explicit reopening and fresh acceptance.
 
 ## Mandatory workflow
 
@@ -178,7 +182,8 @@ Run `close-stage`; do not simulate closure by editing state files.
 Contracted closure additionally requires current successful `run-check` receipts and
 `--approval-ref` for the owner's actual sign-off. Resolve blocking/needs-owner N-IDs
 through `resolve-note` with a ratified D-ID. Changed frozen inputs require owner review
-and explicit cancellation/replacement, never silent reinterpretation of the contract.
+and a linked `revise-stage` successor. Preserve earlier agreement/evidence and rerun
+checks; cancellation records abandonment, never successful completion.
 
 ## Failure policy
 
@@ -199,6 +204,7 @@ and explicit cancellation/replacement, never silent reinterpretation of the cont
 - [references/resolution-policy.md](references/resolution-policy.md)
 - [references/recovery.md](references/recovery.md)
 - [references/stage-contracts.md](references/stage-contracts.md)
+- [references/controlled-iteration.md](references/controlled-iteration.md)
 - [references/hooks.md](references/hooks.md)
 - [references/runtime.md](references/runtime.md)
 - [OPERATOR.md](OPERATOR.md) — command-focused operator guide

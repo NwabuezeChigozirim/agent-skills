@@ -29,6 +29,11 @@ to product meaning, user-visible behavior, business rules, trust or privacy boun
 acceptance semantics, programme scope or major ordering need this; smaller refinements
 stay where the work happens. A downstream document never repairs an upstream one
 silently, and a technology never creates a requirement.
+Use [controlled iteration](controlled-iteration.md) to compare the old agreement and
+current artifacts, route affected work back to its owner, and approve a linked stage
+revision. An affected ID is a review candidate, not proof that its implementation must
+change. Explicitly account for removed obligations; never carry old check evidence or
+sign-off into the revised agreement.
 
 ## Reversible local assumptions
 

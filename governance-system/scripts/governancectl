@@ -26,6 +26,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import engineering_policy as policy  # noqa: E402
 import stage_contracts as stages  # noqa: E402
+import change_impact as impact  # noqa: E402
 
 
 SCHEMA_VERSION = 3
@@ -1723,6 +1724,13 @@ def command_check_stage(repo: Path, requested_policy: str = "auto") -> dict[str,
             "valid": report["valid"] and not selected["policy_errors"]}
 
 
+def command_stage_impact(repo: Path, contract_path: str | None, requested_policy: str = "auto") -> dict[str, Any]:
+    selected = policy.evaluate_policy(repository_root(repo), requested=requested_policy)
+    report = impact.build_report(sys.modules[__name__], repo, contract_path)
+    return {**selected, "impact": report, "analysis_valid": True,
+            "valid": not selected["policy_errors"], "read_only": True, "acceptance_checked": False}
+
+
 def find_skill_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -1961,6 +1969,16 @@ def build_parser() -> argparse.ArgumentParser:
         subparsers.add_parser(name)
     for name in ["validate", "check-stage"]:
         subparsers.add_parser(name).add_argument("--policy", choices=["auto", "legacy", "current"], default="auto")
+    impact_parser = subparsers.add_parser("stage-impact")
+    impact_parser.add_argument("--contract")
+    impact_parser.add_argument("--policy", choices=["auto", "legacy", "current"], default="auto")
+    revision_parser = subparsers.add_parser("revise-stage")
+    revision_parser.add_argument("--contract", required=True)
+    revision_parser.add_argument("--review", required=True)
+    revision_parser.add_argument("--owner-approved", action="store_true")
+    revision_parser.add_argument("--approval-ref", required=True)
+    revision_parser.add_argument("--reason", required=True)
+    revision_parser.add_argument("--reopen", action="store_true", help="Create a new run from a closed stage without erasing historical acceptance")
     freeze_parser = subparsers.add_parser("freeze-stage")
     freeze_parser.add_argument("--contract", required=True)
     freeze_parser.add_argument("--owner-approved", action="store_true")
@@ -2025,7 +2043,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         repo = resolve_repo(args.repo)
-        if args.command not in {"doctor", "status", "audit", "validate", "resume", "upgrade", "check-stage"}:
+        if args.command not in {"doctor", "status", "audit", "validate", "resume", "upgrade", "check-stage", "stage-impact"}:
             readiness = policy.evaluate_policy(repository_root(repo))
             if readiness["policy_errors"]:
                 raise GovernanceError("; ".join(readiness["policy_errors"]), EXIT_GATE)
@@ -2038,6 +2056,9 @@ def main() -> int:
             "reconcile": lambda: command_reconcile(repo),
             "validate": lambda: command_validate(repo, args.policy),
             "check-stage": lambda: command_check_stage(repo, args.policy),
+            "stage-impact": lambda: command_stage_impact(repo, args.contract, args.policy),
+            "revise-stage": lambda: impact.revise(sys.modules[__name__], repo, args.contract, args.review,
+                                                  args.owner_approved, args.approval_ref, args.reason, args.reopen),
             "freeze-stage": lambda: stages.freeze(sys.modules[__name__], repo, args.contract, args.owner_approved, args.approval_ref),
             "run-check": lambda: stages.run_check(sys.modules[__name__], repo, args.id),
             "cancel-stage": lambda: stages.cancel(sys.modules[__name__], repo, args.owner_approved, args.approval_ref, args.reason),
@@ -2055,7 +2076,7 @@ def main() -> int:
         }
         result = handlers[args.command]()
         render_result(result, args.json)
-        if args.command in {"validate", "audit", "check-stage"} and not result["valid"]:
+        if args.command in {"validate", "audit", "check-stage", "stage-impact"} and not result["valid"]:
             return EXIT_VALIDATION
         if args.command == "run-check" and not result["passed"]:
             return EXIT_VALIDATION

@@ -29,7 +29,9 @@ Phases are navigation state, not acceptance evidence or a one-way execution gate
 For explicit stage-contract opt-in, freeze the approved scope, inputs and checks before
 work; keep the phase independent of contract satisfaction. See
 [stage-contracts.md](stage-contracts.md). Changed inputs cannot be repaired by changing
-the phase: owner-reviewed cancellation/replacement preserves the earlier record.
+the phase: owner-reviewed revision preserves the earlier record and requires new checks.
+Read [controlled-iteration.md](controlled-iteration.md) for impact, re-entry and explicit
+reopening of completed work. A successor updates `next_action`, not the phase silently.
 
 ### Update
 

@@ -74,8 +74,8 @@ python3 scripts/check.py
 python3 scripts/check.py --python-only
 ```
 
-The baseline contains 105 Python tests and 4 renderer tests. Waves 1–4 add policy,
-migration, no-write, content-bound recovery, graph and stage-contract tests. Two explicitly expected-failing
+The baseline contains 105 Python tests and 4 renderer tests. Waves 1–5 add policy,
+migration, no-write, content-bound recovery, graph, stage-contract and revision tests. Two explicitly expected-failing
 regression cases remain for later waves. Expected failures are outstanding defects, not passed checks;
 unexpected successes fail the run so their allowances must be reviewed and removed.
 The Python suites and validators use only the standard library and Git. Renderer tests
@@ -84,7 +84,7 @@ also require `npm ci --prefix spec-chain`, LibreOffice and Poppler (`pdftoppm`).
 The GitHub workflow runs Python checks on Linux/macOS and renderer checks on Linux;
 host-specific symlink checks remain an explicit local installation check.
 
-## Reliability evolution: Waves 1–4
+## Reliability evolution: Waves 1–5
 
 `governancectl audit` and `upgrade --dry-run` are read-only, including for schema-2
 configs. Migration is explicit. Policy 1 retains legacy engineering gates, with recovery
@@ -113,7 +113,15 @@ content-bound execution receipts, blocking-intent resolution and owner sign-off 
 to verified content. Default legacy closure remains unchanged; opted-in runs cannot
 cancel their way back to legacy acceptance. Policy 2 remains unreleased. See the
 [stage contract](governance-system/references/stage-contracts.md) and
-[Wave 4 implementation record](docs/evolution/wave-4.md). Wave 5 remains owner-gated.
+[Wave 4 implementation record](docs/evolution/wave-4.md).
+
+Wave 5 adds conservative change-impact review and immutable contract successors.
+Changed assumptions can re-enter their owning activity; explicit reopening preserves
+historical acceptance while requiring fresh checks. Reports never rewrite specifications
+or plans, silently retire obligations, or reuse old evidence. See
+[controlled iteration](governance-system/references/controlled-iteration.md) and the
+[Wave 5 implementation record](docs/evolution/wave-5.md). Wave 6 remains owner-gated;
+policy 2 is still unreleased.
 
 ## Validators
 

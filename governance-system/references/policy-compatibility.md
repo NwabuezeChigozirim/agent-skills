@@ -34,6 +34,13 @@ of required stage contracts and current content-bound check evidence. A clean
 `stage_valid` still cannot pass the separate policy-release gate. See
 [stage contracts](stage-contracts.md) for owner records, executable checks and limits.
 
+Wave 5 extends those explicit contracts with historical impact baselines and reviewed
+successors, including explicit reopening of completed work. Default legacy runs remain
+unchanged. Existing Wave 4 envelopes are read without mutation and their missing prior
+graph coverage is reported; only a newly approved freeze/revision gains a baseline.
+`stage-impact` is read-only; revision/reopening never waives check, recovery or release
+gates. See [controlled iteration](controlled-iteration.md).
+
 ## Selection
 
 - A project's `.governance/config.json` is authoritative when present.

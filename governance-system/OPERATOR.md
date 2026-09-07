@@ -170,6 +170,16 @@ required gate without enabling policy 2. Missing/stale/failed evidence and unres
 blocking/needs-owner findings cannot be waived with an owner flag. An external local
 approval record avoids changing the tested repository merely to record sign-off.
 
+## Revise or reopen
+
+For changed frozen inputs, inspect `stage-impact --contract docs/stage-next.json`, review
+the affected responsibilities and every retired obligation, then use owner-approved
+`revise-stage` with that current review. For a closed stage, add `--reopen` explicitly:
+the old acceptance stays historical and the new run needs fresh checks/sign-off.
+Do not use a phase change or old test receipts as a revision. Read
+[controlled iteration](references/controlled-iteration.md) for the review format,
+idempotency, historical-baseline limits and when cancellation remains appropriate.
+
 ## State and privacy
 
 - Committed activation: `.governance/config.json` (schema 3; no absolute paths)

@@ -1,7 +1,9 @@
 # Wave 4 — Stage contracts and completion evidence
 
 Start authority: the owner's “Proceed to wave 4”, followed by “Resume”. Wave 5 and
-policy-2 activation remain gated. Work continues from the uncommitted Waves 1–3 baseline.
+policy-2 activation remained gated at that handoff. Work continued from the uncommitted
+Waves 1–3 baseline. Subsequent authority requested committing/pushing Waves 1–4 and
+proceeding to Wave 5; see the [next record](wave-5.md). Results below remain historical.
 
 ## Contract
 
@@ -167,5 +169,6 @@ All mutation and execution tests used disposable fixtures. The source checkout w
 governance-initialized, upgraded, given hooks, frozen into a stage or provided recovery
 refs. No commit, push or release was performed. All earlier Waves 1–3 edits remain.
 
-Wave 4 implementation is ready for owner review; owner sign-off has not been recorded.
-Wave 5 requires fresh progression approval. Waves 5–6 and policy-2 activation remain gated.
+At this historical handoff, Wave 4 was ready for owner review and Wave 5 required fresh
+progression approval. Subsequent commit/push and Wave 5 authority is recorded above.
+Wave 6 and policy-2 activation remain gated.

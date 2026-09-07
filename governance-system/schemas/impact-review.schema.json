@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/governance/impact-review.schema.json",
+  "title": "Owner-reviewed stage revision impact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "impact_sha256", "rationale", "activities", "retirements", "uncertainty"],
+  "properties": {
+    "version": {"const": 1},
+    "impact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rationale": {"type": "string", "minLength": 1},
+    "activities": {
+      "type": "object", "minProperties": 1,
+      "propertyNames": {"enum": ["discovery", "intent", "specification", "planning", "implementation", "validation"]},
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "retirements": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "uncertainty": {"type": "string"}
+  }
+}

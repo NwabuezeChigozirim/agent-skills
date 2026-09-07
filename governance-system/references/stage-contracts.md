@@ -104,8 +104,9 @@ The tested subject includes canonical path, HEAD, raw working/index fingerprint 
 the hashes of declared inputs/outputs, including Git-ignored declared files. Staging
 alone can change the subject. A command that changes its subject cannot certify the
 post-change content; rerun after the change settles. Any subsequent subject change
-invalidates all required checks conservatively. There is no selective impact analysis
-yet, and external services, environment values and toolchain versions are not sealed
+invalidates all required checks conservatively. Impact review can identify potential
+downstream consumers but never permits selective check reuse. External services,
+environment values and toolchain versions are not sealed
 by this fingerprint. Declare relevant configuration files as inputs where appropriate.
 
 `check-stage` is read-only and reports `stage_valid` separately from overall policy
@@ -160,8 +161,10 @@ An interrupted closure with a matching retained receipt can finish without repla
 history. Start a fresh run explicitly with `discover` when the next work is authorized.
 
 Changed frozen inputs require an explicit decision, not a check rerun that silently
-changes scope. Until versioned revision/impact propagation is implemented, cancel the
-old stage and freeze the newly approved contract:
+changes scope. Use `stage-impact` and owner-reviewed `revise-stage` for a continuing
+agreement; read [controlled-iteration.md](controlled-iteration.md) for exact review,
+retirement and reopening rules. Revision retains an immutable predecessor and starts
+with unsatisfied checks. For genuinely abandoned work, cancellation remains available:
 
 ```bash
 governancectl --repo . cancel-stage --owner-approved \
@@ -172,6 +175,10 @@ Cancellation is not completion. It retains the old contract, attempts and cancel
 record; closure stays gated until a replacement contract is frozen and satisfied.
 This is a bounded replacement within the same run, not automatic upstream revision or
 permission to expand the owner's scope.
+
+New freezes also retain compact historical impact baselines. These are immutable
+review evidence, not new product authority. Older hash-only contracts are not silently
+upgraded; impact analysis reports their missing historical coverage explicitly.
 
 ## Storage, trust and operational limits
 

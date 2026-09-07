@@ -42,6 +42,11 @@ possible, already exists, looks impressive or was imagined early.
 
 Read [references/governance-mode.md](references/governance-mode.md) and
 [references/authority.md](references/authority.md) before governance-mode work.
+For revisions inside a governed stage, use the supplied impact review and
+[controlled-iteration contract](../governance-system/references/controlled-iteration.md).
+Re-enter the earliest affected specification responsibility, preserve unaffected
+definitions, and revalidate downstream traces. Governance owns contract revision and
+reopening; this skill does not approve them or reset delivery status.
 
 ## Shared identifiers
 

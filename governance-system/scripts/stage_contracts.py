@@ -181,6 +181,27 @@ def load_stage(rt: Any, repo: Path, run: dict[str, Any], *, check_canonical: boo
         raise ValueError("Canonical worktree changed after contract freeze")
     if contract_errors(envelope.get("contract")):
         raise ValueError("Stored stage contract is malformed")
+    cursor, seen = envelope, {identifier}
+    while cursor.get("revision"):
+        revision = cursor["revision"]
+        if not isinstance(revision, dict):
+            raise ValueError("Stage revision lineage is malformed")
+        parent_id = revision.get("from_stage_id", "")
+        if not isinstance(parent_id, str) or not re.fullmatch(r"ST-[0-9a-f]{32}", parent_id) or parent_id in seen:
+            raise ValueError("Stage revision lineage contains an invalid or cyclic predecessor")
+        seen.add(parent_id)
+        parent = rt.read_json(rt.state_dir(repo) / "stages" / parent_id / "contract.json")
+        if not parent or digest(parent) != revision.get("from_contract_sha256"):
+            raise ValueError("Stage revision predecessor is missing or changed")
+        if revision.get("reopened"):
+            completion = rt.read_json(rt.state_dir(repo) / "stages" / parent_id / "closure.json")
+            if not completion or digest(completion) != revision.get("prior_completion_sha256"):
+                raise ValueError("Reopened stage's historical completion receipt is missing or changed")
+        review = revision.get("review")
+        if (not isinstance(review, dict) or digest(review) != revision.get("review_sha256")
+                or review.get("impact_sha256") != revision.get("impact_sha256")):
+            raise ValueError("Stage revision review is missing or changed")
+        cursor = parent
     return directory, envelope
 
 
@@ -202,11 +223,13 @@ def freeze(rt: Any, repo: Path, contract_path: str, approved: bool, approval_ref
             _, previous = load_stage(rt, repo, run)
             if previous["contract"] == value and previous["inputs"] == inputs and previous["start_approval"] == approval:
                 return {"frozen": True, "changed": False, "stage_id": run["stage_id"]}
-            raise ValueError("An active contract is immutable; cancel it explicitly before freezing a replacement")
+            raise ValueError("An active contract is immutable; use stage-impact and revise-stage for changed scope, or cancel-stage to abandon it")
         identifier = "ST-" + uuid.uuid4().hex
         envelope = {"contract": value, "inputs": inputs, "start_approval": approval,
                     "repository_id": rt.repo_identity(repo), "run_id": run["run_id"],
                     "canonical_worktree": str(root), "frozen_at": rt.utc_now()}
+        from change_impact import snapshot
+        envelope["impact_baseline"] = snapshot(rt, repo, value)
         publish(rt, rt.state_dir(repo) / "stages" / identifier / "contract.json", envelope)
         run.update(stage_id=identifier, stage_contract_sha256=digest(envelope), stage_required=True,
                    updated_at=rt.utc_now())

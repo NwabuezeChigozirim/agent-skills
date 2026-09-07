@@ -28,6 +28,11 @@ Invoke `python3 scripts/governancectl --repo PATH COMMAND`.
 - `run-check --id CHK-###` — execute that frozen command and retain content-bound evidence.
 - `check-stage [--policy auto|legacy|current]` — read-only stage readiness, never execution
   or full artifact/recovery acceptance. Current-policy preview remains nonzero.
+- `stage-impact [--contract PATH] [--policy auto|legacy|current]` — read-only comparison
+  of frozen/current context and proposed scope; potential dependency impact, not approval.
+- `revise-stage --contract PATH --review PATH --owner-approved --approval-ref PATH
+  --reason TEXT [--reopen]` — create a linked immutable successor after a current impact
+  review. Explicit reopening creates a new active run and preserves prior closure.
 - `resolve-note --id N-### --decision D-### --note TEXT --owner-approved` — preserve a
   blocking/needs-owner note while binding its resolution to a ratified decision row.
 - `cancel-stage --owner-approved --approval-ref PATH --reason TEXT` — retain the cancelled
@@ -49,13 +54,16 @@ Invoke `python3 scripts/governancectl --repo PATH COMMAND`.
 Machine-readable commands support `--json`. Human output never includes file contents,
 patches, environment values or secret values.
 
-`doctor`, `status`, `audit`, `validate`, `check-stage`, `resume` and upgrade previews are read-only,
+`doctor`, `status`, `audit`, `validate`, `check-stage`, `stage-impact`, `resume` and upgrade previews are read-only,
 including when local state is absent or config schema 2 is present. Audit validation
 errors use exit 3; blocked upgrades use exit 4. Policy metadata is additive to existing
 JSON fields. Read [policy-compatibility.md](policy-compatibility.md) for exact selection
 and upgrade behavior; current policy 2 is not yet released.
 Stage contract/owner gates use exit 4; failed, stale or timed-out `run-check` results use
 exit 3. See [stage-contracts.md](stage-contracts.md) before authorizing command execution.
+Read [controlled-iteration.md](controlled-iteration.md) before revising/reopening a
+contract. Impact `analysis_valid` means a report was built, never acceptance or complete
+graph coverage; uncertainty stays explicit. Stale/missing owner reviews gate revision.
 
 ## State
 

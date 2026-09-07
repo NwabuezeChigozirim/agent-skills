@@ -21,7 +21,7 @@ SKILLS = ["governance-system", "plan-waves-slices", "spec-chain"]
 # philosophy is stated once in spec-chain and cited by the other two packages.
 REQUIRED_FILES: dict[str, list[str]] = {
     "spec-chain": ["references/need-first.md", "scripts/specification_graph.py"],
-    "governance-system": ["scripts/engineering_policy.py", "scripts/artifact_contracts.py", "scripts/stage_contracts.py"],
+    "governance-system": ["scripts/engineering_policy.py", "scripts/artifact_contracts.py", "scripts/stage_contracts.py", "scripts/change_impact.py"],
     "plan-waves-slices": ["scripts/planning_graph.py"],
 }
 
