@@ -291,6 +291,10 @@ class GovernanceRuntimeTests(unittest.TestCase):
         self.repo = (Path(self.temp.name) / "repo").resolve()
         self.repo.mkdir()
         run(["git", "init", "-q"], self.repo)
+        # Keep asynchronous Git housekeeping from racing strict filesystem snapshots.
+        # Set these before the first commit, and only in this disposable repository.
+        run(["git", "config", "maintenance.auto", "false"], self.repo)
+        run(["git", "config", "gc.auto", "0"], self.repo)
         (self.repo / "app.txt").write_text("base\n", encoding="utf-8")
         run(["git", "add", "app.txt"], self.repo)
         run(["git", "commit", "-q", "-m", "test: initialize fixture"], self.repo)

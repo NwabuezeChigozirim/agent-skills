@@ -206,7 +206,15 @@ class SuiteValidatorTests(unittest.TestCase):
 
     def test_absent_sync_script_fails_naming_where_it_looked(self) -> None:
         errors = self.expect_invalid("--check-projections")
-        expected = self.root.parent / "scripts" / "sync-skills.sh"
+        expected = self.root.resolve().parent / "scripts" / "sync-skills.sh"
+        self.assertEqual(errors, [f"{expected}: sync-skills.sh not found; pass --sync-script PATH"])
+
+    def test_absent_sync_script_reports_resolved_symlink_root(self) -> None:
+        alias = Path(self.temp.name) / "suite-alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        self.root = alias
+        errors = self.expect_invalid("--check-projections")
+        expected = alias.resolve().parent / "scripts" / "sync-skills.sh"
         self.assertEqual(errors, [f"{expected}: sync-skills.sh not found; pass --sync-script PATH"])
 
     def test_non_executable_sync_script_fails(self) -> None:
