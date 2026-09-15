@@ -1,0 +1,105 @@
+{
+  "skill": "systems-design-decision-framework",
+  "philosophy": "SKILL.md",
+  "cases": [
+    {
+      "name": "small-crud",
+      "prompt": "Design an internal CRUD app for 20 staff; indexed queries meet 300 ms and changes must be immediately visible.",
+      "should_trigger": true,
+      "expected": [
+        "Keeps simple synchronous baseline",
+        "No speculative queue/cache/replicas/gateway",
+        "Preserves transactional invariants and required recovery"
+      ]
+    },
+    {
+      "name": "durable-video",
+      "prompt": "Video jobs take 30\u2013180 seconds. Acknowledge quickly; accepted work must survive restarts. Large media; existing PostgreSQL; traffic unknown.",
+      "should_trigger": true,
+      "expected": [
+        "Async jobs, durable buffering, worker and object storage justified",
+        "Considers DB queue without requiring broker",
+        "No invented capacity facts",
+        "Covers duplicate and object/DB crash boundaries"
+      ]
+    },
+    {
+      "name": "immediate-slow",
+      "prompt": "Every caller requires a finished result within 200 ms. Processing takes at least 30 seconds. Can a queue solve this?",
+      "should_trigger": true,
+      "expected": [
+        "Identifies infeasible deadline",
+        "Does not silently change completion semantics",
+        "Surfaces product or computation change"
+      ]
+    },
+    {
+      "name": "dual-write",
+      "prompt": "An order commits then the process crashes before publishing its required event. What mechanism is justified?",
+      "should_trigger": true,
+      "expected": [
+        "Atomic state and publication intent with relay or equivalent",
+        "Acknowledges eventual publication and possible duplicates",
+        "No end-to-end exactly-once claim"
+      ]
+    },
+    {
+      "name": "payment-timeout",
+      "prompt": "A payment provider times out. It may have charged the customer. We have a queue with three retries. Design recovery.",
+      "should_trigger": true,
+      "expected": [
+        "Unknown outcome distinguished from failure",
+        "Provider operation identity/status or reconciliation before repeat charge",
+        "No claim local dedup makes provider effect atomic"
+      ]
+    },
+    {
+      "name": "overload",
+      "prompt": "Arrivals stay at 100 jobs/s. Ten parallel workers each average one second/job. Should we add a queue?",
+      "should_trigger": true,
+      "expected": [
+        "Computes nominal 10 jobs/s capacity and 90 jobs/s backlog growth",
+        "Queue cannot stabilize sustained overload",
+        "Considers bottleneck, capacity, admission and deadline"
+      ]
+    },
+    {
+      "name": "fanout",
+      "prompt": "Billing, analytics and notifications must independently react to completed purchases, with independent downtime and replay.",
+      "should_trigger": true,
+      "expected": [
+        "Distinguishes event subscriptions from competing workers",
+        "Defines durability, replay and duplicate effects per consumer",
+        "Does not select Kafka merely from consumer count"
+      ]
+    },
+    {
+      "name": "stale-cache",
+      "prompt": "Reads are expensive, but every authorization decision must reflect revocation immediately. Should we cache everything?",
+      "should_trigger": true,
+      "expected": [
+        "Does not assume stale authorization acceptable",
+        "Separates cacheable data from strict consistency path",
+        "Evaluates optimization before cache/replica"
+      ]
+    },
+    {
+      "name": "scheduled-replay",
+      "prompt": "A daily settlement job spans a daylight-saving transition, may overlap, and can be manually rerun.",
+      "should_trigger": true,
+      "expected": [
+        "Defines business date/timezone and missed-run policy",
+        "Distinguishes accidental duplicate from intentional rerun",
+        "Handles concurrency and irreversible effects"
+      ]
+    },
+    {
+      "name": "scope-boundary",
+      "prompt": "Change the button color to blue.",
+      "should_trigger": false,
+      "expected": [
+        "Does not initiate architecture analysis"
+      ]
+    }
+  ]
+}

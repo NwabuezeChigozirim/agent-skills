@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Point the Cursor and Claude Code skill directories at this checkout.
 #
-#   <checkout>/{governance-system,plan-waves-slices,spec-chain}
+#   <checkout>/<skill>
 #     -> ~/.cursor/skills/<skill>     symlink
 #     -> ~/.claude/skills/<skill>     symlink
 #
-# The three packages must stay siblings: governancectl locates the spec-chain and plan
+# The governance, specification and planning packages must stay siblings: governancectl locates the spec-chain and plan
 # validators relative to its own resolved path. With --runtime the host directories
 # symlink through a stable intermediate path instead, so moving the checkout later needs
 # only one symlink repointed.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SKILLS=(governance-system plan-waves-slices spec-chain)
+SKILLS=(governance-system plan-waves-slices spec-chain systems-design-decision-framework)
 HOSTS=("$HOME/.cursor/skills" "$HOME/.claude/skills")
 RUNTIME=""
 DRY=0

@@ -1,14 +1,23 @@
 # Agent skills: specification, governance and delivery planning
 
-Three Claude Code / Cursor skills that make **user need** decide what becomes a
+Four Claude Code / Cursor skills that make **user need** decide what becomes a
 specification, and keep every downstream artifact explainable back to a real user in a
 real context.
 
 | Skill | Owns |
 |---|---|
 | [`spec-chain`](spec-chain) | Concept Note, Functional Specification, Technical/System Design, and the traceability between them |
+| [`systems-design-decision-framework`](systems-design-decision-framework) | Requirement-driven architecture pattern decisions and reliability tradeoffs |
 | [`plan-waves-slices`](plan-waves-slices) | Owner-gated waves and reviewable vertical slices |
 | [`governance-system`](governance-system) | Discovery, evidence, document authority, canonical worktree state, reconciliation, hooks, validation, handoff |
+
+## Systems design decisions
+
+Use `$systems-design-decision-framework` to evaluate a capability from requirements,
+workload and failure modes. It first decides whether a pattern is justified, then
+compares implementations. Decisions feed the canonical TSD without creating a second
+authority. It includes a pattern rubric, failure analysis, a decision template and
+worked examples.
 
 ## The idea
 
@@ -18,8 +27,8 @@ itself: "I need a map" tells you the user is thinking about location, not that a
 belongs in the product.
 
 The philosophy is stated once, in
-[`spec-chain/references/need-first.md`](spec-chain/references/need-first.md); the other
-two packages cite it rather than restating it. Its central test is that nothing earns
+[`spec-chain/references/need-first.md`](spec-chain/references/need-first.md); governance and
+planning cite it rather than restating it. Its central test is that nothing earns
 its place in a product because it fits the product identity, is technically possible,
 already exists, looks impressive, or was imagined early — only because it materially
 helps a user accomplish a real job in the realities of their context.

@@ -11,7 +11,7 @@ import unittest
 
 
 VALIDATOR = Path(__file__).resolve().parents[1] / "scripts" / "validate_suite.py"
-SKILLS = ["governance-system", "plan-waves-slices", "spec-chain"]
+SKILLS = ["governance-system", "plan-waves-slices", "spec-chain", "systems-design-decision-framework"]
 
 SKILL_MD = """---
 name: {name}
@@ -24,6 +24,7 @@ Reads [references/notes.md](references/notes.md).
 
 # spec-chain states the philosophy; the other two point at it across the sibling boundary.
 PHILOSOPHY = {
+    "systems-design-decision-framework": "SKILL.md",
     "spec-chain": "references/need-first.md",
     "governance-system": "../spec-chain/references/need-first.md",
     "plan-waves-slices": "../spec-chain/references/need-first.md",

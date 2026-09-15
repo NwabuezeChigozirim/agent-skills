@@ -1,0 +1,4 @@
+interface:
+  display_name: "Systems Design Decision Framework"
+  short_description: "Derive architecture from requirements and failure modes"
+  default_prompt: "Use $systems-design-decision-framework to evaluate this subsystem and justify the simplest adequate architecture."

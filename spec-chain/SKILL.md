@@ -132,6 +132,12 @@ technical risks. Prefer the simplest adequate architecture and reversible choice
 technology cannot create a requirement; a better product possibility discovered here is
 surfaced upstream under `Product deltas surfaced`, never absorbed.
 
+For capability-level pattern decisions, use the sibling
+[Systems Design Decision Framework](../systems-design-decision-framework/SKILL.md)
+when queues, events, caching, scaling or reliability mechanisms need justification.
+Carry its reasoning into the canonical TSD with existing F/T and decision references;
+it does not create a second specification or decision authority.
+
 ### 7. Verify external claims and arithmetic
 
 Read [references/verification.md](references/verification.md) before asserting any

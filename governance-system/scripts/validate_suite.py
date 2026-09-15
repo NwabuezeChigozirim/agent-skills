@@ -15,7 +15,7 @@ import subprocess
 LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
-SKILLS = ["governance-system", "plan-waves-slices", "spec-chain"]
+SKILLS = ["governance-system", "plan-waves-slices", "spec-chain", "systems-design-decision-framework"]
 
 # Files whose absence makes the suite structurally invalid, per skill. The need-first
 # philosophy is stated once in spec-chain and cited by the other two packages.
