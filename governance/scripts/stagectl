@@ -5,6 +5,7 @@ freeze     freeze an owner-approved contract for this worktree
 run-check  execute frozen checks and record content-bound receipts
 status     read-only readiness report
 close      close the stage; succeeds only when every receipt is current
+verify     independent verdict: rerun the checks from a different worktree
 revise     replace the contract with an owner-approved successor
 cancel     abandon the stage without completing it
 
@@ -38,7 +39,8 @@ _spec = importlib.util.spec_from_loader("verifyctl", _loader)
 verifyctl = importlib.util.module_from_spec(_spec)
 _loader.exec_module(verifyctl)
 
-CONTRACT_FIELDS = {"version", "name", "intent", "inputs", "outputs", "acceptance", "checks"}
+CONTRACT_FIELDS = {"version", "name", "intent", "review", "inputs", "outputs", "acceptance", "checks"}
+REVIEWS = ("independent", "none")
 VAGUE = re.compile(r"^(todo|tbd|n/?a|none|placeholder|\.+)$", re.IGNORECASE)
 
 
@@ -154,7 +156,9 @@ def contract_errors(value: Any) -> list[str]:
         return ["contract must be an object"]
     errors: list[str] = []
     if set(value) != CONTRACT_FIELDS or value.get("version") != 1:
-        errors.append("contract requires exactly version=1, name, intent, inputs, outputs, acceptance and checks")
+        errors.append("contract requires exactly version=1, name, intent, review, inputs, outputs, acceptance and checks")
+    if value.get("review") not in REVIEWS:
+        errors.append("contract review must be 'independent' or 'none'")
     if not meaningful(value.get("name")) and not (isinstance(value.get("name"), str) and len(value["name"].strip()) >= 3):
         errors.append("contract name is missing")
     if not meaningful(value.get("intent")):
@@ -329,24 +333,28 @@ def inspect(root: Path) -> dict[str, Any]:
         elif attempt["subject"] != current or result["subject_after"] != current:
             issue("check-stale", f"{check['id']}: the code changed after this check passed; run it again")
         evidence.append({"check_id": check["id"], "attempt": path.name, "result_sha256": digest(result)})
+    verdict = None
+    if contract["review"] == "independent":
+        verdicts = sorted((directory / "verdicts").glob("*/verdict.json"))
+        verdict = read_json(verdicts[-1]) if verdicts else None
+        if not verdict:
+            issue("review-missing", "no independent verdict yet; run 'stagectl verify' from a different worktree")
+        elif verdict.get("record_sha256") != digest({k: v for k, v in verdict.items() if k != "record_sha256"}):
+            issue("evidence-corrupt", "the independent verdict record was altered")
+        elif verdict["contract_sha256"] != pointer["contract_sha256"] or verdict["subject"] != current:
+            issue("review-stale", "the code changed after the independent verdict; verify again")
+        elif verdict["outcome"] != "pass":
+            issue("review-failed", f"independent verdict: {verdict['outcome']}; {verdict['summary']}")
     return {"stage_id": pointer["stage_id"], "name": contract["name"], "intent": contract["intent"],
+            "review": contract["review"], "verdict": digest(verdict) if verdict else None,
             "ready": not problems, "problems": problems, "evidence": evidence, "subject": current,
             "contract_sha256": pointer["contract_sha256"]}
 
 
-def run_one(root: Path, identifier: str) -> dict[str, Any]:
-    pointer, directory, envelope = active(root)
-    check = next((c for c in envelope["contract"]["checks"] if c["id"] == identifier), None)
-    if not check:
-        raise Invalid(f"unknown check ID: {identifier}")
-    attempts = sorted((directory / "checks").glob("*.json"))
-    path = directory / "checks" / f"{max((int(p.stem) for p in attempts), default=0) + 1:08d}.json"
-    before = subject(root, envelope["contract"])
-    attempt = {"check_id": identifier, "argv": check["argv"], "subject": before,
-               "contract_sha256": pointer["contract_sha256"], "started_at": now()}
-    publish(path, attempt)  # Recorded first, so an interrupted attempt supersedes an older pass.
+def execute(root: Path, check: dict[str, Any], log: Path) -> tuple[int | None, str]:
+    """Run one frozen argv in root without a shell; the combined output goes to log."""
     code, status = None, "failed"
-    log = path.with_suffix(".log")
+    log.parent.mkdir(parents=True, exist_ok=True)
     with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
         try:
             process = subprocess.Popen(check["argv"], cwd=root, stdin=subprocess.DEVNULL, stdout=handle,
@@ -361,6 +369,22 @@ def run_one(root: Path, identifier: str) -> dict[str, Any]:
                 status = "timed-out"
         except OSError:
             status = "could-not-start"
+    return code, status
+
+
+def run_one(root: Path, identifier: str) -> dict[str, Any]:
+    pointer, directory, envelope = active(root)
+    check = next((c for c in envelope["contract"]["checks"] if c["id"] == identifier), None)
+    if not check:
+        raise Invalid(f"unknown check ID: {identifier}")
+    attempts = sorted((directory / "checks").glob("*.json"))
+    path = directory / "checks" / f"{max((int(p.stem) for p in attempts), default=0) + 1:08d}.json"
+    before = subject(root, envelope["contract"])
+    attempt = {"check_id": identifier, "argv": check["argv"], "subject": before,
+               "contract_sha256": pointer["contract_sha256"], "started_at": now()}
+    publish(path, attempt)  # Recorded first, so an interrupted attempt supersedes an older pass.
+    log = path.with_suffix(".log")
+    code, status = execute(root, check, log)
     after = subject(root, envelope["contract"])
     if status == "passed" and before != after:
         status = "changed-subject"  # A check that edits the code cannot certify the result.
@@ -379,13 +403,67 @@ def run_checks(root: Path, identifier: str | None) -> dict[str, Any]:
     return {"results": results, "passed": all(r["status"] == "passed" for r in results)}
 
 
+def verify(root: Path, stage_id: str, outcome: str, summary: str) -> dict[str, Any]:
+    """Record an independent verdict from a worktree other than the author's.
+
+    The verifier's checkout must hold exactly the author's code, which forces the work
+    to be committed, and every frozen check is rerun there. Only a verifier that
+    declares pass, with every rerun passing, yields a passing verdict.
+    """
+    if not re.fullmatch(r"ST-[0-9a-f]{32}", stage_id):
+        raise Invalid("--stage must be a stage ID such as ST-...")
+    if not meaningful(summary):
+        raise Invalid("--summary must say what was driven and what was observed")
+    with locked(root):
+        directory = state_dir(root) / "stages" / stage_id
+        envelope = read_json(directory / "contract.json")
+        if not envelope:
+            raise Invalid(f"unknown stage: {stage_id}")
+        author = Path(envelope["worktree"])
+        if author == root:
+            raise Invalid("an independent verdict must come from a different worktree than the one that did the work")
+        pointer = read_json(pointer_path(author)) if author.is_dir() else None
+        if not pointer or pointer["stage_id"] != stage_id:
+            raise Invalid("that stage is not active in its worktree")
+        contract = envelope["contract"]
+        if contract["review"] != "independent":
+            raise Invalid("this stage's contract does not call for an independent verdict")
+        target = subject(author, contract)
+        before = subject(root, contract)
+        if before != target:
+            raise Invalid("this worktree does not hold the author's exact code: the author commits everything, "
+                          "then the verifier checks out that commit with no other changes (keep repro files "
+                          "under a Git-ignored directory such as .verify/)")
+        existing = sorted((directory / "verdicts").glob("*"))
+        home = directory / "verdicts" / f"{max((int(p.name) for p in existing), default=0) + 1:08d}"
+        results = []
+        for check in contract["checks"]:
+            log = home / f"{check['id']}.log"
+            code, status = execute(root, check, log)
+            results.append({"check_id": check["id"], "status": status, "returncode": code,
+                            "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()})
+        if subject(root, contract) != before:
+            final = "invalid"
+            summary = "the verifier's worktree changed while the checks ran; " + summary
+        elif any(r["status"] != "passed" for r in results):
+            final = "fail"
+        else:
+            final = outcome
+        verdict = {"stage_id": stage_id, "contract_sha256": pointer["contract_sha256"], "subject": target,
+                   "declared": outcome, "outcome": final, "summary": summary.strip(), "checks": results,
+                   "verifier_worktree": str(root), "recorded_at": now()}
+        verdict["record_sha256"] = digest(verdict)
+        publish(home / "verdict.json", verdict)
+    return {"stage_id": stage_id, "outcome": final, "results": results, "verdict": str(home / "verdict.json")}
+
+
 def close(root: Path) -> dict[str, Any]:
     with locked(root):
         report = inspect(root)
         if not report["ready"]:
             return {"closed": False, **report}
         directory = state_dir(root) / "stages" / report["stage_id"]
-        closure = {key: report[key] for key in ("stage_id", "contract_sha256", "subject", "evidence")}
+        closure = {key: report[key] for key in ("stage_id", "contract_sha256", "subject", "evidence", "verdict")}
         closure["closed_at"] = now()
         publish(directory / "closure.json", closure)
         pointer_path(root).unlink()
@@ -420,6 +498,10 @@ def main() -> int:
     target.add_argument("--id")
     target.add_argument("--all", action="store_true")
     commands.add_parser("status")
+    verify_parser = commands.add_parser("verify")
+    verify_parser.add_argument("--stage", required=True, help="stage ID reported by the author's freeze or status")
+    verify_parser.add_argument("--outcome", required=True, choices=["pass", "fail"])
+    verify_parser.add_argument("--summary", required=True)
     commands.add_parser("close")
     commands.add_parser("cancel").add_argument("--reason", required=True)
     args = parser.parse_args()
@@ -435,6 +517,9 @@ def main() -> int:
         elif args.command == "status":
             result = inspect(root)
             code = 0 if result["ready"] else 3
+        elif args.command == "verify":
+            result = verify(root, args.stage, args.outcome, args.summary)
+            code = 0 if result["outcome"] == "pass" else 3
         elif args.command == "close":
             result = close(root)
             code = 0 if result["closed"] else 3
@@ -454,7 +539,8 @@ def main() -> int:
         for item in result.get("results", []):
             print(f"{item['check_id']}: {item['status']}")
         summary = {k: v for k, v in result.items() if k in ("frozen", "changed", "revised", "closed", "cancelled",
-                                                            "ready", "passed", "stage_id", "receipt")}
+                                                            "ready", "passed", "stage_id", "receipt", "outcome",
+                                                            "verdict")}
         if summary:
             print(json.dumps(summary))
     return code

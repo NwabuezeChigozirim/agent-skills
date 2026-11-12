@@ -59,6 +59,21 @@ scripts/stagectl --repo . run-check --all
 scripts/stagectl --repo . close
 ```
 
+### Independent verdict
+
+| Piece | What it does |
+|---|---|
+| `skills/verify-stage` | A second agent checks out the exact commit in its own worktree, drives the app itself, tries to break it, and records PASS or FAIL |
+| `skills/interrogate`, `skills/arena` | pstack's adversarial review: several agents try to break a change, and only findings proven by a run survive |
+| `stagectl verify` | Refuses the author's worktree, requires the verifier's checkout to match the author's code exactly, and reruns every frozen check there. A contract with `"review": "independent"` cannot close without a passing verdict on the current code |
+
+```bash
+scripts/stagectl --repo ../verifier-worktree verify --stage ST-... --outcome pass --summary "..."
+```
+
+This separates checkouts, not identities: it proves the work was committed and passes
+in a clean tree, and it cannot prove a different agent ran the command.
+
 Ported from `governance-system/scripts/stage_contracts.py`, without policy versions,
 approval-record files, discovery notes or impact review. The owner approves once at
 freeze and again only for a revision. There is one stage per worktree, so agents in
@@ -72,12 +87,11 @@ State is local to the machine (`<git-common-dir>/governance-v3/`); Linux and mac
 
 ## Planned, in order
 
-1. Independent verifier and adversarial review
-2. Hooks, installer and the Claude Code adapter
+1. Hooks, installer and the Claude Code adapter
 
 ## Credit
 
-Seven skills and the feature-map example are taken from
+Nine skills and the feature-map example are taken from
 [pstack](https://github.com/cursor/plugins/tree/main/pstack) by Lauren Tan (MIT, commit
 `2eaf465`), with additions that wire them to `verifyctl` and `rulectl`. See
 `THIRD_PARTY_LICENSE-pstack`.

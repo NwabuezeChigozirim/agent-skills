@@ -23,6 +23,7 @@ Write `stage.json` in the repository:
   "version": 1,
   "name": "Bulk archive action",
   "intent": "Users can archive several selected notes at once from the list view.",
+  "review": "independent",
   "inputs": ["docs/notes-FSD.md"],
   "outputs": ["src/notes/archive.ts"],
   "acceptance": [
@@ -36,6 +37,7 @@ Write `stage.json` in the repository:
 ```
 
 - `intent` is your restatement from step 1.
+- `review` is `independent` for any change that ships behavior: a second agent must verify it from its own checkout before the stage can close. Use `none` only for changes with no behavior to drive, such as docs or a rename, and say why when you ask for approval.
 - Each acceptance item states an outcome a user could observe, and names the checks that prove it.
 - `inputs` are the files whose change would invalidate this agreement (specs, the wave brief). `outputs` must exist and be nonempty at close. Either list may be empty.
 - A check is an argv array, not a shell string. It must not edit the code it checks.
@@ -62,13 +64,19 @@ stagectl --repo . status
 
 A receipt is bound to the exact code that was tested. Any edit afterwards makes it stale, so run the checks last. Fix failures at their root cause and rerun; do not weaken a check or an acceptance item to make it pass.
 
-## 5. Close
+## 5. Get the independent verdict
+
+When `review` is `independent`, commit everything, then hand the stage ID and commit to a fresh agent with the **verify-stage** skill. Use a subagent or a cloud agent that has not seen this conversation. Give it the stage ID and the commit, not your reasoning.
+
+You cannot record the verdict yourself: `stagectl verify` refuses the worktree that did the work, and requires the verifier's checkout to match your committed code exactly. If the verdict is `fail`, fix the root cause, commit, rerun the checks, and ask for a fresh verdict. Any edit after a verdict makes it stale.
+
+## 6. Close
 
 ```bash
 stagectl --repo . close
 ```
 
-It succeeds only when every check's latest attempt passed on the current code, the frozen inputs are unchanged and the outputs exist. It needs no owner flag. Report the stage ID and the receipt path.
+It succeeds only when every check's latest attempt passed on the current code, the frozen inputs are unchanged, the outputs exist, and an independent stage has a passing verdict on that same code. It needs no owner flag. Report the stage ID and the receipt path.
 
 ## When the agreement changes
 

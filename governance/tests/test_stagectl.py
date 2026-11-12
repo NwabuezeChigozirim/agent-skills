@@ -19,6 +19,7 @@ def contract(**changes) -> dict:
         "version": 1,
         "name": "Totals slice",
         "intent": "Booking totals multiply days by the daily rate and reject negative days.",
+        "review": "none",
         "inputs": ["spec.md"],
         "outputs": ["app.py"],
         "acceptance": [{"id": "AC-001", "description": "The total for three days at ten is thirty", "checks": ["CHK-001"]}],
@@ -66,7 +67,7 @@ class StagectlTests(unittest.TestCase):
         self.assertIn("--owner-approved", out["error"])
 
     def test_malformed_contracts_are_refused(self) -> None:
-        for bad in (contract(intent="todo"), contract(checks=[]),
+        for bad in (contract(intent="todo"), contract(checks=[]), contract(review="self"),
                     contract(checks=[{"id": "CHK-001", "argv": "pytest", "timeout_seconds": 30}]),
                     contract(acceptance=[{"id": "AC-001", "description": "The total is thirty for three days", "checks": ["CHK-009"]}])):
             self.write("stage.json", json.dumps(bad))
@@ -159,6 +160,77 @@ class StagectlTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(out["completed"])
         self.assertEqual(self.ctl("status")[0], 2)
+
+    # independent verdict
+
+    def reviewed_stage(self) -> tuple[str, Path]:
+        self.write("stage.json", json.dumps(contract(review="independent")))
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "contract")
+        code, out = self.ctl("freeze", "--contract", "stage.json", "--owner-approved")
+        self.assertEqual(code, 0, out)
+        other = self.repo.parent / (self.repo.name + "-verifier")
+        self.addCleanup(shutil.rmtree, other, True)
+        self.git("worktree", "add", "-q", "--detach", str(other), "HEAD")
+        return out["stage_id"], other
+
+    def verify(self, where: Path, stage: str, outcome: str = "pass") -> tuple[int, dict]:
+        result = subprocess.run(
+            [sys.executable, "-B", str(STAGECTL), "--repo", str(where), "--json", "verify", "--stage", stage,
+             "--outcome", outcome, "--summary", "Drove totals through the CLI and saw thirty"],
+            capture_output=True, text=True, check=False)
+        return result.returncode, json.loads(result.stdout)
+
+    def test_independent_stage_cannot_close_without_a_verdict(self) -> None:
+        self.reviewed_stage()
+        self.ctl("run-check", "--all")
+        code, out = self.ctl("close")
+        self.assertEqual(code, 3)
+        self.assertEqual(self.codes(out), {"review-missing"})
+
+    def test_author_worktree_cannot_issue_its_own_verdict(self) -> None:
+        stage, _ = self.reviewed_stage()
+        code, out = self.verify(self.repo, stage)
+        self.assertEqual(code, 2)
+        self.assertIn("different worktree", out["error"])
+
+    def test_passing_verdict_from_another_worktree_allows_closure(self) -> None:
+        stage, other = self.reviewed_stage()
+        self.ctl("run-check", "--all")
+        code, out = self.verify(other, stage)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.ctl("close")[0], 0)
+
+    def test_verifier_must_hold_the_authors_exact_code(self) -> None:
+        stage, other = self.reviewed_stage()
+        self.write("app.py", "def total(days, rate):\n    return rate * days\n")
+        code, out = self.verify(other, stage)
+        self.assertEqual(code, 2)
+        self.assertIn("exact code", out["error"])
+
+    def test_declared_fail_and_failing_rerun_both_block(self) -> None:
+        stage, other = self.reviewed_stage()
+        self.ctl("run-check", "--all")
+        self.assertEqual(self.verify(other, stage, "fail")[0], 3)
+        self.assertIn("review-failed", self.codes(self.ctl("close")[1]))
+
+    def test_verdict_goes_stale_when_the_code_changes(self) -> None:
+        stage, other = self.reviewed_stage()
+        self.assertEqual(self.verify(other, stage)[0], 0)
+        self.write("app.py", "def total(days, rate):\n    return rate * days\n")
+        self.ctl("run-check", "--all")
+        self.assertEqual(self.codes(self.ctl("close")[1]), {"review-stale"})
+
+    def test_verifier_rerun_catches_what_passes_only_in_the_authors_tree(self) -> None:
+        # The check depends on a Git-ignored file that exists only in the author's worktree.
+        self.write("check.py", "import os, sys\nsys.exit(0 if os.path.exists('.verify/local-only') else 1)\n")
+        stage, other = self.reviewed_stage()
+        (self.repo / ".verify").mkdir()
+        (self.repo / ".verify" / "local-only").write_text("x", encoding="utf-8")
+        self.assertEqual(self.ctl("run-check", "--all")[0], 0)
+        code, out = self.verify(other, stage)
+        self.assertEqual(code, 3)
+        self.assertEqual(out["outcome"], "fail")
 
     def test_each_worktree_has_its_own_stage(self) -> None:
         self.freeze()
