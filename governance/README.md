@@ -89,7 +89,7 @@ State is local to the machine (`<git-common-dir>/governance-v3/`); Linux and mac
 
 | Piece | What it does |
 |---|---|
-| `skills/govern` | The starting command. Restates the goal, matches the task to a playbook (feature, bug fix, refactor, investigation), and runs it as a stage. Modeled on pstack's `/poteto-mode` |
+| `skills/govern` | The starting command. pstack's `/poteto-mode` router and its 23 playbooks, renamed, with a Governance section that wraps every change-shipping playbook in a stage |
 | `hooks/guard.py` | Blocks an agent from recording owner approval or touching stage records. While a stage is active, blocks destructive or unclassified Git commands. At the end of a turn, sends the agent back once if the stage is still unproven |
 | `hooks/hook_policy.py` | The Git command classifier, copied unchanged from `governance-system` |
 
@@ -108,6 +108,25 @@ to the script, not inside a running Cursor, so the exact payload fields and the
 command that hides `--owner-approved` behind a script or variable is not caught. A
 cloud agent with no human at a terminal has no way to obtain the freeze approval yet.
 
+### Brought in from pstack as-is
+
+| Group | Skills |
+|---|---|
+| Code quality | The 24 `principle-*` skills, `tdd`, `blast-radius`, `no-comments` (with the `comment-sicko` agent), `reflect`, `benchmark-checklist`, `typescript-best-practices` |
+| Context | `how`, `why`, `recall`, `architect`, `teach`, `sharpen` |
+| Scale | `swarm`, `arena`, `figure-it-out`, `show-me-your-work`, `ketchup`, and the autonomous-run, orchestrate, autopilot, babysit and shipping playbooks |
+| Formal verification | `create-formal-verification-skill`, `maintain-formal-verification-skill`, `statechart` |
+| Support | `setup-pstack` (model routing; still writes `pstack-models.mdc`), `unslop`, `technical-writing`, the `govern-agent` delegate |
+
+These are copied unchanged apart from renaming `poteto-mode` to `govern` and
+`poteto-agent` to `govern-agent`. `tests/test_package.py` fails if any skill names a
+skill the plugin does not ship. Some steps still name skills from Cursor's own
+`cursor-team-kit` plugin (`deslop`, `control-ui`, `control-cli`); the Governance section
+tells the agent what to do in their place. The copied TypeScript helpers
+(`statechart`, `govern/scripts`) need `bun` and their own tests were not run here.
+Not brought in: `make-bot-ui`, `ketchup-video`, `automate-me`, `bro`, `poteto-help`
+and the Benny automation pack.
+
 ## Planned, in order
 
 1. Trial inside Cursor on a real project
@@ -115,7 +134,7 @@ cloud agent with no human at a terminal has no way to obtain the freeze approval
 
 ## Credit
 
-Nine skills and the feature-map example are taken from
+Most skills, the playbooks, both agents and the feature-map example are taken from
 [pstack](https://github.com/cursor/plugins/tree/main/pstack) by Lauren Tan (MIT, commit
 `2eaf465`), with additions that wire them to `verifyctl` and `rulectl`. See
 `THIRD_PARTY_LICENSE-pstack`.
