@@ -32,18 +32,18 @@ Last, keep a table in the agent instruction file that pairs each rule with what 
 The table sits under a `## Rules` heading in `AGENTS.md` with exactly these columns:
 
 ```markdown
-| ID | Rule | Level | Enforced by | Notes |
-|---|---|---|---|---|
-| R-001 | Renderer never imports main-process code | lint | `eslint.config.js` rule `no-main-import` | |
-| R-002 | Prefer one PR per slice | docs | | Judgment call; no size threshold fits every change |
+| ID | Rule | Level | Enforced by | Proof | Notes |
+|---|---|---|---|---|---|
+| R-001 | Renderer never imports main-process code | lint | `eslint.config.js` rule no-main-import | `npx eslint rules/bad/R-001.ts` | |
+| R-002 | Prefer one PR per slice | docs | | | Judgment call; no size threshold fits every change |
 ```
 
-`Level` is `architecture`, `types`, `lint`, `test`, or `docs`. Above `docs`, `Enforced by` cites in backticks the repository file that does the enforcing. A `docs` rule says in `Notes` why no higher level worked. Then run the checker, locally and in CI:
+`Level` is `architecture`, `types`, `lint`, `test`, or `docs`. Above `docs`, `Enforced by` cites in backticks the repository file that does the enforcing, and `Proof` is one backticked command that runs that enforcer against a committed example of the mistake, taken from the real past mistake where you can. The proof command must fail. Keep bad examples somewhere the normal build and lint skip, such as `rules/bad/`, so they fail only when the proof targets them. A `docs` rule says in `Notes` why no higher level worked. Then run the checker, locally and in CI:
 
 ```bash
-python3 ../../scripts/rulectl check --repo . --max-docs <n>
+python3 ../../scripts/rulectl check --repo . --prove --max-docs <n>
 ```
 
-It exits 3 when a rule cites no existing enforcer, a `docs` rule gives no reason, or the count of `docs` rules passes the limit. Set the limit to today's count and lower it as rules move up. A rule the checker rejects is not in force, whatever the table says.
+It exits 3 when a rule cites no existing enforcer, a proof passes (the enforcer let the mistake through) or cannot run, a `docs` rule gives no reason, or the count of `docs` rules passes the limit. Set the limit to today's count and lower it as rules move up. A rule the checker rejects is not in force, whatever the table says.
 
 **Reply:** each class with its evidence, the level you picked, and why a higher level didn't work.

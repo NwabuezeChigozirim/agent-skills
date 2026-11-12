@@ -12,7 +12,9 @@ import unittest
 
 
 RULECTL = Path(__file__).resolve().parents[1] / "scripts" / "rulectl"
-HEADER = "| ID | Rule | Level | Enforced by | Notes |\n|---|---|---|---|---|\n"
+HEADER = "| ID | Rule | Level | Enforced by | Proof | Notes |\n|---|---|---|---|---|---|\n"
+FAILS = "`python3 -c \"raise SystemExit(1)\"`"
+PASSES = "`python3 -c pass`"
 
 
 class RulectlTests(unittest.TestCase):
@@ -36,8 +38,8 @@ class RulectlTests(unittest.TestCase):
 
     def test_enforced_rules_pass(self) -> None:
         self.write(
-            "| R-001 | Renderer never imports main | lint | `eslint.config.js` rule no-main-import | |\n"
-            "| R-002 | Totals never go negative | test | `tests/test_boundary.py::test` | |\n"
+            f"| R-001 | Renderer never imports main | lint | `eslint.config.js` rule no-main-import | {FAILS} | |\n"
+            f"| R-002 | Totals never go negative | test | `tests/test_boundary.py::test` | {FAILS} | |\n"
         )
         code, out = self.check()
         self.assertEqual(code, 0, out)
@@ -45,34 +47,34 @@ class RulectlTests(unittest.TestCase):
         self.assertEqual(out["unenforced"], [])
 
     def test_rule_without_existing_enforcer_fails(self) -> None:
-        self.write("| R-001 | No raw SQL | lint | `tools/missing_lint.py` | |\n")
+        self.write(f"| R-001 | No raw SQL | lint | `tools/missing_lint.py` | {FAILS} | |\n")
         code, out = self.check()
         self.assertEqual(code, 3)
         self.assertTrue(any("R-001" in e and "not found" in e for e in out["errors"]))
 
     def test_prose_only_enforcer_fails(self) -> None:
-        self.write("| R-001 | No raw SQL | lint | reviewers check this | |\n")
+        self.write(f"| R-001 | No raw SQL | lint | reviewers check this | {FAILS} | |\n")
         code, out = self.check()
         self.assertEqual(code, 3)
         self.assertTrue(any("cite in backticks" in e for e in out["errors"]))
 
     def test_enforcer_outside_repository_is_not_accepted(self) -> None:
-        self.write("| R-001 | No raw SQL | lint | `../eslint.config.js` | |\n")
+        self.write(f"| R-001 | No raw SQL | lint | `../eslint.config.js` | {FAILS} | |\n")
         self.assertEqual(self.check()[0], 3)
 
     def test_docs_rule_needs_a_reason_and_is_reported_unenforced(self) -> None:
-        self.write("| R-001 | Prefer small PRs | docs | | |\n")
+        self.write("| R-001 | Prefer small PRs | docs | | | |\n")
         code, out = self.check()
         self.assertEqual(code, 3)
-        self.write("| R-001 | Prefer small PRs | docs | | Judgment call; no size threshold fits every change |\n")
+        self.write("| R-001 | Prefer small PRs | docs | | | Judgment call; no size threshold fits every change |\n")
         code, out = self.check()
         self.assertEqual(code, 0, out)
         self.assertEqual(out["unenforced"], ["R-001"])
 
     def test_max_docs_limits_unenforced_rules(self) -> None:
         self.write(
-            "| R-001 | Prefer small PRs | docs | | Judgment call |\n"
-            "| R-002 | Name things clearly | docs | | Judgment call |\n"
+            "| R-001 | Prefer small PRs | docs | | | Judgment call |\n"
+            "| R-002 | Name things clearly | docs | | | Judgment call |\n"
         )
         self.assertEqual(self.check("--max-docs", "2")[0], 0)
         code, out = self.check("--max-docs", "1")
@@ -81,10 +83,10 @@ class RulectlTests(unittest.TestCase):
 
     def test_duplicate_bad_id_and_bad_level_fail(self) -> None:
         self.write(
-            "| R-001 | A | lint | `eslint.config.js` | |\n"
-            "| R-001 | B | lint | `eslint.config.js` | |\n"
-            "| RULE7 | C | lint | `eslint.config.js` | |\n"
-            "| R-003 | D | review | `eslint.config.js` | |\n"
+            f"| R-001 | A | lint | `eslint.config.js` | {FAILS} | |\n"
+            f"| R-001 | B | lint | `eslint.config.js` | {FAILS} | |\n"
+            f"| RULE7 | C | lint | `eslint.config.js` | {FAILS} | |\n"
+            f"| R-003 | D | review | `eslint.config.js` | {FAILS} | |\n"
         )
         code, out = self.check()
         self.assertEqual(code, 3)
@@ -102,8 +104,36 @@ class RulectlTests(unittest.TestCase):
         self.assertTrue(any("no rules" in e for e in self.check()[1]["errors"]))
 
     def test_tables_in_other_sections_are_ignored(self) -> None:
-        self.write("| R-001 | A | lint | `eslint.config.js` | |\n")
+        self.write(f"| R-001 | A | lint | `eslint.config.js` | {FAILS} | |\n")
         self.assertEqual(self.check()[1]["rules"], 1)
+
+    def test_enforced_rule_needs_a_proof_command(self) -> None:
+        self.write("| R-001 | No raw SQL | lint | `eslint.config.js` | we tested it once | |\n")
+        code, out = self.check()
+        self.assertEqual(code, 3)
+        self.assertTrue(any("Proof must be one backticked command" in e for e in out["errors"]))
+
+    def test_prove_accepts_a_proof_that_fails_and_is_not_run_without_the_flag(self) -> None:
+        self.write(f"| R-001 | No raw SQL | lint | `eslint.config.js` | {FAILS} | |\n")
+        code, out = self.check()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("proven", out)
+        code, out = self.check("--prove")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["proven"], ["R-001"])
+
+    def test_prove_rejects_an_enforcer_that_lets_the_bad_example_through(self) -> None:
+        self.write(f"| R-001 | No raw SQL | lint | `eslint.config.js` | {PASSES} | |\n")
+        self.assertEqual(self.check()[0], 0)
+        code, out = self.check("--prove")
+        self.assertEqual(code, 3)
+        self.assertTrue(any("accepted the bad example" in e for e in out["errors"]))
+
+    def test_prove_does_not_count_a_missing_tool_as_a_rejection(self) -> None:
+        self.write("| R-001 | No raw SQL | lint | `eslint.config.js` | `no-such-linter-xyz bad.ts` | |\n")
+        code, out = self.check("--prove")
+        self.assertEqual(code, 3)
+        self.assertTrue(any("not found" in e for e in out["errors"]))
 
     def test_missing_instruction_file_fails(self) -> None:
         self.assertEqual(self.check()[0], 3)

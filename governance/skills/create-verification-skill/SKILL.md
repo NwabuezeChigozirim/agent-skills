@@ -41,12 +41,12 @@ First run `verify-<app>/verifyctl lint --skill .cursor/skills/verify-<app>` and 
 
 ```bash
 verifyctl record --skill .cursor/skills/verify-<app> --run .verify/runs/<run-id> \
-  --feature <feature-id> --entry "<user entry point>" --outcome verified \
+  --feature <feature-id> --entry <entry point number> --outcome verified \
   --artifact <proof file inside the run directory>
 verifyctl check --skill .cursor/skills/verify-<app> --run .verify/runs/<run-id> --feature <feature-id>
 ```
 
-The feature ID is the feature file's name without `.md`. `failed` and `unreachable` outcomes take `--reason` in place of proof and never count as verified. `check` exits 0 only when the evidence is still byte-identical to what was recorded and the feature has a verified entry point with no failed one. Use `--all` for a full pass over the map. A reply that claims a feature works without a passing `check` is a claim, not a proof.
+The feature ID is the feature file's name without `.md`. `failed` and `unreachable` outcomes take `--reason` in place of proof and never count as verified. `--entry` is the entry point's position in the feature file's `How to get to it (user POV)` list, or its exact text. `check` exits 0 only when the evidence is still byte-identical to what was recorded, every entry point the feature file lists has a record, at least one is verified, and none failed. Record an entry point you cannot reach as `unreachable` with the unmet precondition; leaving it out fails the check. Use `--all` for a full pass over the map. A reply that claims a feature works without a passing `check` is a claim, not a proof.
 
 Run its own instructions end to end once: launch, doctor, drive ONE mapped feature (one is enough; the map exists so later runs can cover the rest), capture evidence, clean up. After cleanup, confirm the evidence still exists at the named location — a cleanup that eats the proof fails this step. Fix what fails, and run the generated cleanup after every failed iteration too, so broken attempts don't strand processes and ports. A generated skill that was never executed is a draft, not a deliverable. If you proved it in a stand-in for the real target (a container in place of a fresh VM, a local stack in place of a remote one), list every setup step the stand-in did that the target will not. Those steps stay unverified until a run on the real target covers them.
 

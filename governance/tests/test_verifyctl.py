@@ -67,7 +67,7 @@ class VerifyctlTests(unittest.TestCase):
         (self.run_dir / name).write_bytes(data)
         return name
 
-    def record(self, feature: str, outcome: str = "verified", *extra: str, entry: str = "New note button"):
+    def record(self, feature: str, outcome: str = "verified", *extra: str, entry: str = "1"):
         return run("record", "--skill", str(self.skill), "--run", str(self.run_dir), "--feature", feature,
                    "--entry", entry, "--outcome", outcome, *extra)
 
@@ -144,40 +144,69 @@ class VerifyctlTests(unittest.TestCase):
 
     # check
 
+    def drive_all(self, feature: str = "create-note") -> None:
+        for number in ("1", "2", "3"):
+            result = self.record(feature, "verified", "--artifact", self.proof(), entry=number)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_recorded_proof_passes_for_that_feature(self) -> None:
-        self.assertEqual(self.record("create-note", "verified", "--artifact", self.proof()).returncode, 0)
+        self.drive_all()
         result = self.check("--feature", "create-note")
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_every_listed_entry_point_must_be_driven(self) -> None:
+        self.record("create-note", "verified", "--artifact", self.proof(), entry="1")
+        result = self.check("--feature", "create-note")
+        self.assertEqual(result.returncode, 3)
+        errors = json.loads(result.stdout)["errors"]
+        self.assertTrue(any("entry point 2 was not driven" in e for e in errors))
+        self.assertTrue(any("entry point 3 was not driven" in e for e in errors))
+
+    def test_entry_accepts_exact_text_and_refuses_unlisted_text(self) -> None:
+        exact = "Choose the `New note` button in the browser toolbar."
+        self.assertEqual(self.record("create-note", "verified", "--artifact", self.proof(), entry=exact).returncode, 0)
+        result = self.record("create-note", "verified", "--artifact", self.proof(), entry="some other way")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("listed in create-note.md", result.stderr)
+        self.assertEqual(self.record("create-note", "verified", "--artifact", self.proof(), entry="9").returncode, 2)
+
+    def test_unreachable_entry_with_reason_counts_as_driven(self) -> None:
+        self.record("create-note", "verified", "--artifact", self.proof(), entry="1")
+        self.record("create-note", "verified", "--artifact", self.proof(), entry="2")
+        self.record("create-note", "unreachable", "--reason", "CLI needs a paid seat", entry="3")
+        self.assertEqual(self.check("--feature", "create-note").returncode, 0)
+
     def test_all_requires_every_mapped_feature(self) -> None:
-        self.record("create-note", "verified", "--artifact", self.proof())
+        self.drive_all()
         result = self.check("--all")
         self.assertEqual(result.returncode, 3)
         self.assertTrue(any("search: no evidence" in e for e in json.loads(result.stdout)["errors"]))
 
     def test_tampered_or_deleted_evidence_fails(self) -> None:
-        self.record("create-note", "verified", "--artifact", self.proof())
+        self.drive_all()
         (self.run_dir / "list.png").write_bytes(b"edited")
         self.assertTrue(any("changed after" in e for e in json.loads(self.check("--feature", "create-note").stdout)["errors"]))
         (self.run_dir / "list.png").unlink()
         self.assertTrue(any("evidence missing" in e for e in json.loads(self.check("--feature", "create-note").stdout)["errors"]))
 
     def test_later_failure_supersedes_earlier_pass(self) -> None:
-        self.record("create-note", "verified", "--artifact", self.proof())
+        self.drive_all()
         self.record("create-note", "failed", "--reason", "Save button stayed disabled")
         result = self.check("--feature", "create-note")
         self.assertEqual(result.returncode, 3)
-        self.assertEqual(len(json.loads((self.run_dir / "manifest.json").read_text())["records"]), 2)
+        self.assertTrue(any("failed via" in e for e in json.loads(result.stdout)["errors"]))
+        self.assertEqual(len(json.loads((self.run_dir / "manifest.json").read_text())["records"]), 4)
 
     def test_unreachable_entry_is_not_reported_as_verified(self) -> None:
-        self.record("create-note", "unreachable", "--reason", "needs a paid seat", entry="CLI")
+        for number in ("1", "2", "3"):
+            self.record("create-note", "unreachable", "--reason", "needs a paid seat", entry=number)
         result = self.check("--feature", "create-note")
         self.assertEqual(result.returncode, 3)
         self.assertTrue(any("not verified" in e for e in json.loads(result.stdout)["errors"]))
 
     def test_failure_on_one_entry_blocks_despite_pass_on_another(self) -> None:
-        self.record("create-note", "verified", "--artifact", self.proof())
-        self.record("create-note", "failed", "--reason", "exit code 1", entry="CLI")
+        self.drive_all()
+        self.record("create-note", "failed", "--reason", "exit code 1", entry="3")
         self.assertEqual(self.check("--feature", "create-note").returncode, 3)
 
     def test_fresh_rejects_evidence_recorded_before_a_code_change(self) -> None:
@@ -194,9 +223,10 @@ class VerifyctlTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         (run_dir / "list.png").write_bytes(b"proof")
         base = ["--skill", str(skill), "--run", str(run_dir)]
-        recorded = run("record", *base, "--feature", "create-note", "--entry", "button", "--outcome", "verified",
-                       "--artifact", "list.png")
-        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        for number in ("1", "2", "3"):
+            recorded = run("record", *base, "--feature", "create-note", "--entry", number, "--outcome", "verified",
+                           "--artifact", "list.png")
+            self.assertEqual(recorded.returncode, 0, recorded.stderr)
         self.assertEqual(run("check", *base, "--feature", "create-note", "--fresh").returncode, 0)
         (repo / "app.py").write_text("print(2)\n", encoding="utf-8")
         stale = run("--json", "check", *base, "--feature", "create-note", "--fresh")
@@ -213,7 +243,7 @@ class VerifyctlTests(unittest.TestCase):
         run_dir.mkdir()
         (run_dir / "p.png").write_bytes(b"x")
         result = run("record", "--skill", str(skill), "--run", str(run_dir), "--feature", "create-note",
-                     "--entry", "button", "--outcome", "verified", "--artifact", "p.png")
+                     "--entry", "1", "--outcome", "verified", "--artifact", "p.png")
         self.assertEqual(result.returncode, 2)
         self.assertIn("not ignored", result.stderr)
 

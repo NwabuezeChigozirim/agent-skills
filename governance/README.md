@@ -26,8 +26,9 @@ scripts/verifyctl check  --skill ... --run .verify/runs/<id> --all
 Exit codes: 0 valid, 2 invalid invocation, 3 validation failed. Standard library only.
 
 `verifyctl` proves the evidence exists, is unchanged since it was recorded, and covers
-the requested features. It does not judge whether a screenshot shows the right thing,
-and it does not yet check that every entry point a feature file lists was driven.
+the requested features through every entry point their feature files list. An entry
+point that cannot be reached is recorded as `unreachable` with its reason; one with no
+record fails the check. It does not judge whether a screenshot shows the right thing.
 
 ### Environment: the rule table
 
@@ -35,15 +36,17 @@ and it does not yet check that every entry point a feature file lists was driven
 |---|---|
 | `skills/correct` | Finds mistakes agents repeat and fixes each at the highest level that works: architecture, types, lint, test, docs last |
 | `skills/principle-encode-lessons-in-structure` | The rule that a repeated instruction should become a check |
-| `scripts/rulectl` | Reads the `## Rules` table in `AGENTS.md` and fails when a rule cites no existing enforcer, a docs-only rule gives no reason, or docs-only rules exceed a limit |
+| `scripts/rulectl` | Reads the `## Rules` table in `AGENTS.md` and fails when a rule cites no existing enforcer, its proof does not fail, a docs-only rule gives no reason, or docs-only rules exceed a limit |
 
 ```bash
-scripts/rulectl check --repo . --max-docs 3
+scripts/rulectl check --repo . --prove --max-docs 3
 ```
 
-`rulectl` proves a rule points at a real enforcement file. It does not run that
-enforcer or confirm it would catch the mistake; `/correct` requires showing each new
-check failing on a real past mistake.
+Each enforced rule carries a Proof: a command that runs the enforcer against a
+committed example of the mistake. `--prove` runs it and rejects the rule when the
+command passes or cannot run, so a rule whose enforcer catches nothing is not counted
+as enforced. A failing proof shows the enforcer rejects that one example, not every
+form of the mistake. `--prove` executes commands from the instruction file.
 
 ### Flow: the stage contract
 

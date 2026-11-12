@@ -69,6 +69,25 @@ def feature_files(skill: Path) -> list[Path]:
     return sorted(p for p in root.glob("*.md") if p.name != "README.md")
 
 
+def entry_points(path: Path) -> list[str]:
+    """The user entry points a feature file lists, in order."""
+    sections = headings(path.read_text(encoding="utf-8"), 2)
+    body = next((text for title, text in sections if title == FEATURE_SECTIONS[1]), "")
+    return [line[2:].strip() for line in body.splitlines() if line.startswith("- ") and line[2:].strip()]
+
+
+def resolve_entry(path: Path, value: str) -> tuple[int, str]:
+    """Map --entry (a 1-based number or the bullet's exact text) to a listed entry point."""
+    listed = entry_points(path)
+    value = value.strip()
+    if value.isdigit() and 1 <= int(value) <= len(listed):
+        return int(value), listed[int(value) - 1]
+    if value in listed:
+        return listed.index(value) + 1, value
+    numbered = "; ".join(f"{i}. {text}" for i, text in enumerate(listed, 1)) or "none"
+    raise Invalid(f"--entry must be the number or exact text of an entry point listed in {path.name}: {numbered}")
+
+
 def lint_feature(path: Path) -> list[str]:
     errors: list[str] = []
     name = f"features/{path.name}"
@@ -96,6 +115,8 @@ def lint_feature(path: Path) -> list[str]:
             errors.append(f"{name}: section '{title}' is empty")
     if not re.search(r"^- `[^`]+`", sections[0][1], re.MULTILINE):
         errors.append(f"{name}: Sub-features needs at least one bullet starting with a backticked ID")
+    if not entry_points(path):
+        errors.append(f"{name}: '{FEATURE_SECTIONS[1]}' needs at least one bullet, one per entry point")
     driving = [line for line in sections[2][1].splitlines() if line.strip()]
     if driving and not driving[0].strip().startswith("Preconditions:"):
         errors.append(f"{name}: '{sections[2][0]}' must start with 'Preconditions:'")
@@ -244,17 +265,17 @@ def record(skill: Path, run: Path, args: argparse.Namespace) -> dict[str, Any]:
     manifest = load_manifest(run) if path.exists() else {"version": 1, "skill": skill.name, "records": []}
     if manifest.get("skill") != skill.name:
         raise Invalid(f"this run belongs to skill '{manifest.get('skill')}', not '{skill.name}'")
+    number, text = resolve_entry(skill / "features" / f"{args.feature}.md", args.entry)
     entry = {
         "feature": args.feature,
-        "entry": args.entry.strip(),
+        "entry": text,
+        "entry_number": number,
         "outcome": args.outcome,
         "reason": (args.reason or "").strip(),
         "artifacts": [artifact_entry(run, value) for value in args.artifact],
         "subject": worktree_fingerprint(skill),
         "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-    if not entry["entry"]:
-        raise Invalid("--entry must name the user entry point that was driven")
     manifest["records"].append(entry)
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -285,6 +306,8 @@ def check(skill: Path, run: Path, features: list[str], everything: bool, fresh: 
         if feature not in known:
             errors.append(f"{feature}: recorded but no longer in the feature map")
             continue
+        if entry not in entry_points(skill / "features" / f"{feature}.md"):
+            continue  # The map no longer lists this entry point; its record is history only.
         summary.setdefault(feature, {name: [] for name in OUTCOMES})[item["outcome"]].append(entry)
         if fresh and current is not None and item.get("subject") != current:
             errors.append(f"{feature}: evidence via {entry} is stale; the code changed after it was recorded")
@@ -300,6 +323,10 @@ def check(skill: Path, run: Path, features: list[str], everything: bool, fresh: 
             errors.append(f"{feature}: not in the feature map")
             continue
         state = summary.get(feature)
+        recorded = {entry for (name, entry) in latest if name == feature}
+        for number, text in enumerate(entry_points(skill / "features" / f"{feature}.md"), 1):
+            if state and text not in recorded:
+                errors.append(f"{feature}: entry point {number} was not driven: {text}")
         if not state:
             errors.append(f"{feature}: no evidence recorded")
         elif state["failed"]:
@@ -319,7 +346,8 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument("--skill", required=True)
     record_parser.add_argument("--run", required=True, help="directory that holds this run's evidence")
     record_parser.add_argument("--feature", required=True, help="feature ID: the feature file name without .md")
-    record_parser.add_argument("--entry", required=True, help="the user entry point that was driven")
+    record_parser.add_argument("--entry", required=True,
+                               help="the entry point driven: its number in the feature file, or its exact text")
     record_parser.add_argument("--outcome", required=True, choices=OUTCOMES)
     record_parser.add_argument("--reason", help="required for failed or unreachable")
     record_parser.add_argument("--artifact", action="append", default=[], help="proof file inside the run directory")
