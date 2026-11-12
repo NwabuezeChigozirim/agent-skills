@@ -153,7 +153,7 @@ def lint(skill: Path) -> list[str]:
 
     for helper in sorted(p for p in skill.rglob("*") if p.is_file() and p.suffix != ".md"):
         relative = helper.relative_to(skill).as_posix()
-        if not os.access(helper, os.X_OK):
+        if os.name != "nt" and not os.access(helper, os.X_OK):  # Windows has no executable bit.
             errors.append(f"{relative}: helper is not executable")
         if helper.name not in text:
             errors.append(f"{relative}: helper invocation is not shown in SKILL.md")

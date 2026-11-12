@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -118,7 +119,8 @@ class VerifyctlTests(unittest.TestCase):
         helper.write_text("#!/bin/sh\n", encoding="utf-8")
         helper.chmod(0o644)
         errors = self.lint_errors()
-        self.assertTrue(any("not executable" in e for e in errors))
+        if os.name != "nt":
+            self.assertTrue(any("not executable" in e for e in errors))
         self.assertTrue(any("not shown in SKILL.md" in e for e in errors))
 
     # record

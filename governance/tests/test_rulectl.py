@@ -13,8 +13,9 @@ import unittest
 
 RULECTL = Path(__file__).resolve().parents[1] / "scripts" / "rulectl"
 HEADER = "| ID | Rule | Level | Enforced by | Proof | Notes |\n|---|---|---|---|---|---|\n"
-FAILS = "`python3 -c \"raise SystemExit(1)\"`"
-PASSES = "`python3 -c pass`"
+PYTHON = Path(sys.executable).as_posix()  # Forward slashes survive shlex on Windows.
+FAILS = f"`{PYTHON} -c \"raise SystemExit(1)\"`"
+PASSES = f"`{PYTHON} -c pass`"
 
 
 class RulectlTests(unittest.TestCase):

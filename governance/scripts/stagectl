@@ -10,7 +10,8 @@ revise     replace the contract with an owner-approved successor
 cancel     abandon the stage without completing it
 
 One stage per worktree, so parallel agents in separate worktrees do not collide.
-State lives under <git-common-dir>/governance-v3/. Standard library and Git only.
+State lives under <git-common-dir>/governance-v3/. Standard library and Git only;
+Linux, macOS and Windows.
 Exit codes: 0 ok, 2 invalid invocation, 3 checks failed or stale, 4 owner approval needed.
 """
 
@@ -19,7 +20,6 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import fcntl
 import hashlib
 from importlib.machinery import SourceFileLoader
 import importlib.util
@@ -31,6 +31,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Iterator
 import uuid
 
@@ -124,12 +125,28 @@ def publish(path: Path, value: Any) -> None:
 def locked(root: Path) -> Iterator[None]:
     directory = state_dir(root)
     directory.mkdir(parents=True, exist_ok=True)
-    with open(directory / "lock", "w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+    with open(directory / "lock", "a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            while True:  # msvcrt has no blocking lock without a timeout, so poll.
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def local_file(root: Path, value: str) -> Path:
@@ -357,14 +374,21 @@ def execute(root: Path, check: dict[str, Any], log: Path) -> tuple[int | None, s
     log.parent.mkdir(parents=True, exist_ok=True)
     with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
         try:
+            group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+                     else {"start_new_session": True})
             process = subprocess.Popen(check["argv"], cwd=root, stdin=subprocess.DEVNULL, stdout=handle,
-                                       stderr=subprocess.STDOUT, start_new_session=True,
-                                       env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+                                       stderr=subprocess.STDOUT, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                                       **group)
             try:
                 code = process.wait(timeout=check["timeout_seconds"])
                 status = "passed" if code == 0 else "failed"
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+                if os.name == "nt":
+                    # Kill the whole tree; taskkill is part of Windows.
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True, check=False)
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
                 status = "timed-out"
         except OSError:

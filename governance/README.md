@@ -86,7 +86,8 @@ the current code, so a stage cannot close on proof gathered before the last edit
 Limits: `--owner-approved` is an attestation, not authentication. A passing check does
 not prove the check covers its acceptance item. Environment, services and toolchain
 versions are not part of the fingerprint. Reopening a closed stage is not implemented.
-State is local to the machine (`<git-common-dir>/governance-v3/`); Linux and macOS only.
+State is local to the machine (`<git-common-dir>/governance-v3/`). The three scripts
+run on Linux, macOS and Windows; on Windows invoke them as `python <path>`.
 
 ### Entry point, hooks and install
 
