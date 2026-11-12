@@ -30,12 +30,18 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          # spec-chain/assets/CON.md cannot be checked out on Windows (CON is a
-          # reserved device name), so this job checks out only what it tests.
-          sparse-checkout: governance
+      # spec-chain/assets/CON.md cannot exist on Windows (CON is a reserved device
+      # name) and actions/checkout refuses the whole tree because of it. Check out
+      # only the governance package, with the NTFS path check off for the index.
+      - name: Sparse checkout of governance
+        shell: bash
+        run: |
+          git init -q .
+          git config core.protectNTFS false
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}"
+          git sparse-checkout set governance
+          git fetch -q --depth 1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
