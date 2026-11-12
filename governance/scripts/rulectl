@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Check that every engineering rule in the agent instruction file names what enforces it.
+
+The rule table lives under a `## Rules` heading (AGENTS.md by default):
+
+| ID | Rule | Level | Enforced by | Notes |
+|---|---|---|---|---|
+| R-001 | Renderer never imports main-process code | lint | `eslint.config.js` | |
+
+Levels, strongest first: architecture, types, lint, test, docs. A rule above `docs`
+must cite, in backticks, at least one repository file that implements the enforcement,
+and that file must exist. A `docs` rule is unenforced: nothing fails when an agent
+skips it, so it must say in Notes why no higher level worked.
+
+Standard library only. Exit codes: 0 ok, 2 invalid invocation, 3 validation failed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import re
+import sys
+from typing import Any
+
+LEVELS = ("architecture", "types", "lint", "test", "docs")
+COLUMNS = ("id", "rule", "level", "enforced by", "notes")
+RULE_ID = re.compile(r"^R-\d{3,}$")
+BACKTICKED = re.compile(r"`([^`]+)`")
+SEPARATOR = re.compile(r"^:?-{3,}:?$")
+
+
+def cells(line: str) -> list[str]:
+    parts = re.split(r"(?<!\\)\|", line.strip())
+    return [part.strip().replace("\\|", "|") for part in parts[1:-1]]
+
+
+def rules_table(text: str) -> list[list[str]] | None:
+    """Rows of the first table under `## Rules`, header included; None when absent."""
+    rows: list[list[str]] = []
+    inside = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if inside:
+                break
+            inside = line[3:].strip().lower() == "rules"
+            continue
+        if inside and line.strip().startswith("|"):
+            row = cells(line)
+            if not all(SEPARATOR.match(cell) for cell in row):
+                rows.append(row)
+        elif inside and rows and line.strip():
+            break
+    return rows if inside or rows else None
+
+
+def enforcer_paths(repo: Path, value: str) -> tuple[list[str], list[str]]:
+    """Split backticked tokens into existing repository files and unresolved ones."""
+    found: list[str] = []
+    missing: list[str] = []
+    for token in BACKTICKED.findall(value):
+        candidate = token.split()[0].split(":")[0] if token.strip() else ""
+        target = repo / candidate
+        try:
+            inside = bool(candidate) and target.resolve().is_relative_to(repo.resolve())
+        except OSError:
+            inside = False
+        if inside and target.is_file():
+            found.append(candidate)
+        else:
+            missing.append(token)
+    return found, missing
+
+
+def check(repo: Path, source: Path, max_docs: int | None) -> tuple[list[str], dict[str, Any]]:
+    errors: list[str] = []
+    name = source.name
+    if not source.is_file():
+        return [f"{name}: file not found"], {}
+    rows = rules_table(source.read_text(encoding="utf-8"))
+    if rows is None:
+        return [f"{name}: no '## Rules' section"], {}
+    if not rows:
+        return [f"{name}: the Rules section has no table"], {}
+    header = [cell.lower() for cell in rows[0]]
+    if tuple(header) != COLUMNS:
+        return [f"{name}: Rules table columns must be: ID | Rule | Level | Enforced by | Notes"], {}
+    seen: set[str] = set()
+    counts = {level: 0 for level in LEVELS}
+    unenforced: list[str] = []
+    for row in rows[1:]:
+        if len(row) != len(COLUMNS):
+            errors.append(f"{name}: malformed rule row: {' | '.join(row)}")
+            continue
+        rule_id, rule, level, enforced, notes = row
+        level = level.lower()
+        if not RULE_ID.match(rule_id):
+            errors.append(f"{rule_id or '(blank)'}: ID must look like R-001")
+            continue
+        if rule_id in seen:
+            errors.append(f"{rule_id}: duplicate ID")
+        seen.add(rule_id)
+        if not rule:
+            errors.append(f"{rule_id}: the rule text is empty")
+        if level not in LEVELS:
+            errors.append(f"{rule_id}: level must be one of {', '.join(LEVELS)}")
+            continue
+        counts[level] += 1
+        if level == "docs":
+            unenforced.append(rule_id)
+            if not notes:
+                errors.append(f"{rule_id}: a docs rule must say in Notes why no higher level worked")
+            continue
+        found, missing = enforcer_paths(repo, enforced)
+        if not found:
+            detail = f" ({', '.join(missing)} not found)" if missing else ""
+            errors.append(
+                f"{rule_id}: 'Enforced by' must cite in backticks a repository file that "
+                f"implements the {level} enforcement{detail}"
+            )
+    if not seen and not errors:
+        errors.append(f"{name}: the Rules table has no rules")
+    if max_docs is not None and len(unenforced) > max_docs:
+        errors.append(
+            f"{len(unenforced)} unenforced docs rules exceed the limit of {max_docs}: {', '.join(unenforced)}"
+        )
+    return errors, {"rules": len(seen), "levels": counts, "unenforced": unenforced}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="rulectl", description=__doc__.splitlines()[0])
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    commands = parser.add_subparsers(dest="command", required=True)
+    check_parser = commands.add_parser("check", help="validate the rule table")
+    check_parser.add_argument("--repo", default=".")
+    check_parser.add_argument("--file", default="AGENTS.md", help="instruction file, relative to the repository")
+    check_parser.add_argument("--max-docs", type=int, help="fail when more docs-level rules than this exist")
+    args = parser.parse_args()
+    repo = Path(args.repo).resolve()
+    if not repo.is_dir():
+        print(f"error: repository not found: {args.repo}", file=sys.stderr)
+        return 2
+    errors, detail = check(repo, repo / args.file, args.max_docs)
+    if args.json:
+        print(json.dumps({"valid": not errors, "errors": errors, **detail}, indent=2))
+    else:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        if detail.get("unenforced"):
+            print(f"unenforced (docs only): {', '.join(detail['unenforced'])}")
+        print("valid" if not errors else f"invalid: {len(errors)} error(s)")
+    return 3 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

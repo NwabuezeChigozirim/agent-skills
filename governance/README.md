@@ -6,7 +6,9 @@ The rebuild of `governance-system` around one equation: good codebase + good env
 The existing `governance-system` package is untouched and stays the released version
 until this one replaces it. This package breaks compatibility with its policy 1 format.
 
-## What is here now: verification
+## What is here now
+
+### Verification
 
 | Piece | What it does |
 |---|---|
@@ -27,16 +29,31 @@ Exit codes: 0 valid, 2 invalid invocation, 3 validation failed. Standard library
 the requested features. It does not judge whether a screenshot shows the right thing,
 and it does not yet check that every entry point a feature file lists was driven.
 
+### Environment: the rule table
+
+| Piece | What it does |
+|---|---|
+| `skills/correct` | Finds mistakes agents repeat and fixes each at the highest level that works: architecture, types, lint, test, docs last |
+| `skills/principle-encode-lessons-in-structure` | The rule that a repeated instruction should become a check |
+| `scripts/rulectl` | Reads the `## Rules` table in `AGENTS.md` and fails when a rule cites no existing enforcer, a docs-only rule gives no reason, or docs-only rules exceed a limit |
+
+```bash
+scripts/rulectl check --repo . --max-docs 3
+```
+
+`rulectl` proves a rule points at a real enforcement file. It does not run that
+enforcer or confirm it would catch the mistake; `/correct` requires showing each new
+check failing on a real past mistake.
+
 ## Planned, in order
 
-1. Rule table and correction ladder (each rule paired with what enforces it)
-2. Contract core: restated intent frozen as acceptance, checks that call `verifyctl`, automatic closure on current evidence
-3. Independent verifier and adversarial review
-4. Claude Code adapter
+1. Contract core: restated intent frozen as acceptance, checks that call `verifyctl`, automatic closure on current evidence
+2. Independent verifier and adversarial review
+3. Claude Code adapter
 
 ## Credit
 
-The three skills and the feature-map example are taken from
+The five skills and the feature-map example are taken from
 [pstack](https://github.com/cursor/plugins/tree/main/pstack) by Lauren Tan (MIT, commit
-`2eaf465`), with additions that wire them to `verifyctl`. See
+`2eaf465`), with additions that wire them to `verifyctl` and `rulectl`. See
 `THIRD_PARTY_LICENSE-pstack`.
