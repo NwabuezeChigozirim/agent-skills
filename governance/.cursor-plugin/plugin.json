@@ -1,9 +1,15 @@
 {
 	"name": "governance",
 	"displayName": "governance",
-	"version": "3.0.0-alpha.1",
+	"version": "3.0.0-alpha.2",
 	"description": "An environment that makes agents prove their work: verification skills, sealed evidence, and enforced rules.",
 	"license": "MIT",
-	"keywords": ["verification", "governance", "evidence", "workflow"],
-	"skills": "./skills/"
+	"keywords": [
+		"verification",
+		"governance",
+		"evidence",
+		"workflow"
+	],
+	"skills": "./skills/",
+	"hooks": "./hooks/hooks.json"
 }

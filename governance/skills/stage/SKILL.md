@@ -45,13 +45,13 @@ Write `stage.json` in the repository:
 
 ## 3. Get approval and freeze
 
-Show the owner the intent, the acceptance list and the check commands. This is the one approval in the stage. After they approve:
+Show the owner the intent, the acceptance list and the check commands. This is the one approval in the stage. Ask them to run this themselves:
 
 ```bash
 stagectl --repo . freeze --contract stage.json --owner-approved
 ```
 
-Never pass `--owner-approved` before the owner has approved this contract.
+You do not run it. Only the owner records approval, and the plugin's hook blocks an agent that tries. The same holds for `revise`.
 
 ## 4. Do the work, then prove it
 

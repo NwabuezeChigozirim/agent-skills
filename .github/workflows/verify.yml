@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04]  # macOS jobs were being cancelled before start; restore macos-14 when runners are available
         python: ['3.10', '3.12']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15

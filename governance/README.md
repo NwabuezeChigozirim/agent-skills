@@ -85,9 +85,33 @@ not prove the check covers its acceptance item. Environment, services and toolch
 versions are not part of the fingerprint. Reopening a closed stage is not implemented.
 State is local to the machine (`<git-common-dir>/governance-v3/`); Linux and macOS only.
 
+### Entry point, hooks and install
+
+| Piece | What it does |
+|---|---|
+| `skills/govern` | The starting command. Restates the goal, matches the task to a playbook (feature, bug fix, refactor, investigation), and runs it as a stage. Modeled on pstack's `/poteto-mode` |
+| `hooks/guard.py` | Blocks an agent from recording owner approval or touching stage records. While a stage is active, blocks destructive or unclassified Git commands. At the end of a turn, sends the agent back once if the stage is still unproven |
+| `hooks/hook_policy.py` | The Git command classifier, copied unchanged from `governance-system` |
+
+Install for Cursor as a local plugin (skills, hooks and scripts together):
+
+```bash
+scripts/install.sh        # from the repository root; also links ~/.cursor/plugins/local/governance
+```
+
+Then start a task with `/govern <what you want>`.
+
+The hooks follow the layout other Cursor plugins use (`hooks/hooks.json`,
+`${CURSOR_PLUGIN_ROOT}`); pstack itself ships none. They are tested by feeding payloads
+to the script, not inside a running Cursor, so the exact payload fields and the
+`loop_limit` behavior are unconfirmed there. The guard is a guardrail, not a sandbox: a
+command that hides `--owner-approved` behind a script or variable is not caught. A
+cloud agent with no human at a terminal has no way to obtain the freeze approval yet.
+
 ## Planned, in order
 
-1. Hooks, installer and the Claude Code adapter
+1. Trial inside Cursor on a real project
+2. Claude Code adapter
 
 ## Credit
 

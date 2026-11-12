@@ -65,6 +65,12 @@ for host in "${HOSTS[@]}"; do
   done
 done
 
+# governance v3 is a Cursor plugin (skills, hooks and scripts together), not a single skill.
+if [[ -f "$REPO_ROOT/governance/.cursor-plugin/plugin.json" ]]; then
+  run mkdir -p "$HOME/.cursor/plugins/local"
+  run ln -sfn "$source/governance" "$HOME/.cursor/plugins/local/governance"
+fi
+
 if [[ ! -d "$REPO_ROOT/spec-chain/node_modules" ]]; then
   echo "note: spec-chain/node_modules absent; run (cd $REPO_ROOT/spec-chain && npm ci) for the DOCX renderer"
 fi
