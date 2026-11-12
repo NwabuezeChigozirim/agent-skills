@@ -19,7 +19,7 @@ def main() -> int:
     args = parser.parse_args()
     commands = [
         [sys.executable, "-B", "-m", "unittest", "discover", "-s", f"{skill}/tests", "-v"]
-        for skill in ("governance-system", "spec-chain", "plan-waves-slices")
+        for skill in ("governance-system", "spec-chain", "plan-waves-slices", "governance")
     ]
     commands += [[sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-v"],
                  [sys.executable, "-B", "governance-system/scripts/validate_suite.py"]]

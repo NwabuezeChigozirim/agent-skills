@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""Deterministic checks for a project verification skill and its evidence.
+
+lint    validate the structure of a verify-<app> skill and its feature map
+record  seal one feature's proof artifacts into a run manifest
+check   confirm a run's evidence is intact and covers the requested features
+
+Standard library only. Exit codes: 0 ok, 2 invalid invocation, 3 validation failed.
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Any
+
+REQUIRED_SECTIONS = ("Launch", "Doctor", "Drive", "Evidence", "Cleanup")
+FEATURE_SECTIONS = ("Sub-features", "How to get to it (user POV)", "Driving it with ", "Gotchas")
+OUTCOMES = ("verified", "failed", "unreachable")
+PLACEHOLDER = re.compile(r"<app>|<harness>|\bTODO\b|\bTBD\b|\bPLACEHOLDER\b")
+LINK = re.compile(r"\]\((?:\./)?([^)#\s]+\.md)\)")
+MANIFEST = "manifest.json"
+
+
+class Invalid(Exception):
+    """Invalid invocation or unusable input (exit 2)."""
+
+
+def headings(text: str, level: int) -> list[tuple[str, str]]:
+    """Return (title, body) for each heading of the given level, ignoring fenced code."""
+    prefix = "#" * level + " "
+    sections: list[tuple[str, list[str]]] = []
+    fenced = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if not fenced and line.startswith(prefix):
+            sections.append((line[len(prefix):].strip(), []))
+        elif sections:
+            sections[-1][1].append(line)
+    return [(title, "\n".join(body).strip()) for title, body in sections]
+
+
+def frontmatter(text: str) -> dict[str, str]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    fields: dict[str, str] = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return fields
+        key, sep, value = line.partition(":")
+        if sep and not key.startswith((" ", "\t")):
+            fields[key.strip()] = value.strip().strip("\"'")
+    return {}
+
+
+def feature_files(skill: Path) -> list[Path]:
+    root = skill / "features"
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.glob("*.md") if p.name != "README.md")
+
+
+def lint_feature(path: Path) -> list[str]:
+    errors: list[str] = []
+    name = f"features/{path.name}"
+    text = path.read_text(encoding="utf-8")
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines or not lines[0].startswith("# "):
+        errors.append(f"{name}: must start with an H1 title")
+    intro = text.split("\n## ", 1)[0].splitlines()[1:]
+    if not any(line.strip() for line in intro):
+        errors.append(f"{name}: needs one paragraph describing the user-visible behavior before the first section")
+    sections = headings(text, 2)
+    titles = [title for title, _ in sections]
+    matches = len(titles) == len(FEATURE_SECTIONS) and all(
+        title.startswith(want) if want.endswith(" ") else title == want
+        for title, want in zip(titles, FEATURE_SECTIONS)
+    )
+    if not matches:
+        errors.append(
+            f"{name}: needs exactly these H2 sections in order: Sub-features, "
+            "How to get to it (user POV), Driving it with <harness>, Gotchas"
+        )
+        return errors
+    for title, body in sections:
+        if not body:
+            errors.append(f"{name}: section '{title}' is empty")
+    if not re.search(r"^- `[^`]+`", sections[0][1], re.MULTILINE):
+        errors.append(f"{name}: Sub-features needs at least one bullet starting with a backticked ID")
+    driving = [line for line in sections[2][1].splitlines() if line.strip()]
+    if driving and not driving[0].strip().startswith("Preconditions:"):
+        errors.append(f"{name}: '{sections[2][0]}' must start with 'Preconditions:'")
+    if PLACEHOLDER.search(text):
+        errors.append(f"{name}: contains an unfilled placeholder")
+    return errors
+
+
+def lint(skill: Path) -> list[str]:
+    errors: list[str] = []
+    body = skill / "SKILL.md"
+    if not body.is_file():
+        return [f"{skill}: SKILL.md is missing"]
+    text = body.read_text(encoding="utf-8")
+    fields = frontmatter(text)
+    if not fields:
+        errors.append("SKILL.md: YAML frontmatter is missing; without it the skill never registers")
+    else:
+        if fields.get("name") != skill.name:
+            errors.append(f"SKILL.md: frontmatter name must equal the directory name '{skill.name}'")
+        if not skill.name.startswith("verify-"):
+            errors.append("SKILL.md: the skill directory must be named verify-<app>")
+        if not fields.get("description"):
+            errors.append("SKILL.md: frontmatter description is empty")
+    sections = dict(headings(text, 2))
+    for want in REQUIRED_SECTIONS:
+        found = [title for title in sections if title.lower().startswith(want.lower())]
+        if not found:
+            errors.append(f"SKILL.md: missing a '## {want}' section")
+        elif not sections[found[0]]:
+            errors.append(f"SKILL.md: section '{found[0]}' is empty")
+    if PLACEHOLDER.search(text):
+        errors.append("SKILL.md: contains an unfilled placeholder")
+
+    for helper in sorted(p for p in skill.rglob("*") if p.is_file() and p.suffix != ".md"):
+        relative = helper.relative_to(skill).as_posix()
+        if not os.access(helper, os.X_OK):
+            errors.append(f"{relative}: helper is not executable")
+        if helper.name not in text:
+            errors.append(f"{relative}: helper invocation is not shown in SKILL.md")
+
+    index = skill / "features" / "README.md"
+    files = feature_files(skill)
+    if not index.is_file():
+        errors.append("features/README.md: the feature map index is missing")
+    else:
+        linked = set(LINK.findall(index.read_text(encoding="utf-8")))
+        present = {p.name for p in files}
+        for name in sorted(linked - present):
+            errors.append(f"features/README.md: links to missing file {name}")
+        for name in sorted(present - linked):
+            errors.append(f"features/{name}: not listed in features/README.md")
+    if not files:
+        errors.append("features/: the map needs at least one feature file")
+    for path in files:
+        errors.extend(lint_feature(path))
+    return errors
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_manifest(run: Path) -> dict[str, Any]:
+    path = run / MANIFEST
+    if not path.is_file():
+        raise Invalid(f"{path}: no evidence manifest; record at least one feature first")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise Invalid(f"{path}: not valid JSON ({exc})") from exc
+    if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("records"), list):
+        raise Invalid(f"{path}: unsupported manifest shape")
+    return value
+
+
+def artifact_entry(run: Path, value: str) -> dict[str, Any]:
+    path = Path(value)
+    path = path if path.is_absolute() else run / path
+    if path.is_symlink() or not path.is_file():
+        raise Invalid(f"artifact is not a regular file: {value}")
+    try:
+        relative = path.resolve().relative_to(run.resolve())
+    except ValueError as exc:
+        raise Invalid(f"artifact must live inside the run directory: {value}") from exc
+    if relative.as_posix() == MANIFEST:
+        raise Invalid("the manifest cannot be its own artifact")
+    size = path.stat().st_size
+    if size == 0:
+        raise Invalid(f"artifact is empty: {value}")
+    return {"path": relative.as_posix(), "sha256": sha256(path), "bytes": size}
+
+
+def head_of(directory: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(directory), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def record(skill: Path, run: Path, args: argparse.Namespace) -> dict[str, Any]:
+    known = {p.stem for p in feature_files(skill)}
+    if args.feature not in known:
+        raise Invalid(f"unknown feature '{args.feature}'; the map lists: {', '.join(sorted(known)) or 'none'}")
+    if args.outcome == "verified" and not args.artifact:
+        raise Invalid("a verified outcome needs at least one --artifact as proof")
+    if args.outcome != "verified" and not (args.reason or "").strip():
+        raise Invalid(f"a {args.outcome} outcome needs --reason")
+    run.mkdir(parents=True, exist_ok=True)
+    path = run / MANIFEST
+    manifest = load_manifest(run) if path.exists() else {"version": 1, "skill": skill.name, "records": []}
+    if manifest.get("skill") != skill.name:
+        raise Invalid(f"this run belongs to skill '{manifest.get('skill')}', not '{skill.name}'")
+    entry = {
+        "feature": args.feature,
+        "entry": args.entry.strip(),
+        "outcome": args.outcome,
+        "reason": (args.reason or "").strip(),
+        "artifacts": [artifact_entry(run, value) for value in args.artifact],
+        "head": head_of(skill),
+        "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if not entry["entry"]:
+        raise Invalid("--entry must name the user entry point that was driven")
+    manifest["records"].append(entry)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+    return {"recorded": entry["feature"], "entry": entry["entry"], "outcome": entry["outcome"],
+            "artifacts": len(entry["artifacts"])}
+
+
+def check(skill: Path, run: Path, features: list[str], everything: bool) -> tuple[list[str], dict[str, Any]]:
+    errors = lint(skill)
+    manifest = load_manifest(run)
+    known = {p.stem for p in feature_files(skill)}
+    if manifest.get("skill") != skill.name:
+        errors.append(f"manifest belongs to skill '{manifest.get('skill')}', not '{skill.name}'")
+    # The latest record for a feature and entry point wins, so a later failure
+    # supersedes an earlier pass. Older records stay in the manifest as history.
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in manifest["records"]:
+        if not isinstance(item, dict) or item.get("outcome") not in OUTCOMES:
+            errors.append("manifest contains a malformed record")
+            continue
+        latest[(str(item.get("feature")), str(item.get("entry")))] = item
+    summary: dict[str, dict[str, list[str]]] = {}
+    for (feature, entry), item in sorted(latest.items()):
+        if feature not in known:
+            errors.append(f"{feature}: recorded but no longer in the feature map")
+            continue
+        summary.setdefault(feature, {name: [] for name in OUTCOMES})[item["outcome"]].append(entry)
+        for artifact in item.get("artifacts", []):
+            target = run / artifact["path"]
+            if target.is_symlink() or not target.is_file():
+                errors.append(f"{feature}: evidence missing: {artifact['path']}")
+            elif sha256(target) != artifact["sha256"]:
+                errors.append(f"{feature}: evidence changed after it was recorded: {artifact['path']}")
+    required = sorted(known) if everything else features
+    for feature in required:
+        if feature not in known:
+            errors.append(f"{feature}: not in the feature map")
+            continue
+        state = summary.get(feature)
+        if not state:
+            errors.append(f"{feature}: no evidence recorded")
+        elif state["failed"]:
+            errors.append(f"{feature}: failed via {', '.join(state['failed'])}")
+        elif not state["verified"]:
+            errors.append(f"{feature}: not verified; only unreachable entry points were recorded")
+    return errors, {"required": required, "features": summary}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="verifyctl", description=__doc__.splitlines()[0])
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    commands = parser.add_subparsers(dest="command", required=True)
+    lint_parser = commands.add_parser("lint", help="validate a verify-<app> skill and its feature map")
+    lint_parser.add_argument("--skill", required=True)
+    record_parser = commands.add_parser("record", help="seal one feature's proof into the run manifest")
+    record_parser.add_argument("--skill", required=True)
+    record_parser.add_argument("--run", required=True, help="directory that holds this run's evidence")
+    record_parser.add_argument("--feature", required=True, help="feature ID: the feature file name without .md")
+    record_parser.add_argument("--entry", required=True, help="the user entry point that was driven")
+    record_parser.add_argument("--outcome", required=True, choices=OUTCOMES)
+    record_parser.add_argument("--reason", help="required for failed or unreachable")
+    record_parser.add_argument("--artifact", action="append", default=[], help="proof file inside the run directory")
+    check_parser = commands.add_parser("check", help="confirm evidence is intact and covers the features")
+    check_parser.add_argument("--skill", required=True)
+    check_parser.add_argument("--run", required=True)
+    scope = check_parser.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--feature", action="append", default=[], help="feature that must be verified; repeatable")
+    scope.add_argument("--all", action="store_true", help="every feature in the map must be verified")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    skill = Path(args.skill).resolve()
+    try:
+        if not skill.is_dir():
+            raise Invalid(f"skill directory not found: {args.skill}")
+        if args.command == "lint":
+            errors, detail = lint(skill), {}
+        elif args.command == "record":
+            errors, detail = [], record(skill, Path(args.run), args)
+        else:
+            errors, detail = check(skill, Path(args.run), args.feature, args.all)
+    except Invalid as exc:
+        print(json.dumps({"valid": False, "errors": [str(exc)]}) if args.json else f"error: {exc}",
+              file=sys.stdout if args.json else sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({"valid": not errors, "errors": errors, **detail}, indent=2))
+    else:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        print("valid" if not errors else f"invalid: {len(errors)} error(s)")
+    return 3 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
