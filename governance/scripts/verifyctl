@@ -193,15 +193,39 @@ def artifact_entry(run: Path, value: str) -> dict[str, Any]:
     return {"path": relative.as_posix(), "sha256": sha256(path), "bytes": size}
 
 
-def head_of(directory: Path) -> str | None:
+def git_out(directory: Path, *args: str) -> bytes | None:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(directory), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10, check=False,
-        )
+        result = subprocess.run(["git", "-C", str(directory), *args], capture_output=True, timeout=60, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return result.stdout.strip() if result.returncode == 0 else None
+    return result.stdout if result.returncode == 0 else None
+
+
+def worktree_fingerprint(directory: Path) -> str | None:
+    """Hash of the code under test: HEAD, tracked changes, and untracked non-ignored files.
+
+    Git-ignored files are excluded, which is why evidence must live in an ignored
+    directory: recording proof must not change the thing the proof is about.
+    """
+    top = git_out(directory, "rev-parse", "--show-toplevel")
+    if top is None:
+        return None
+    root = Path(top.decode().strip())
+    head = git_out(root, "rev-parse", "HEAD") or b"unborn"
+    diff = git_out(root, "diff", "HEAD", "--binary") if head != b"unborn" else git_out(root, "diff", "--cached", "--binary")
+    others = git_out(root, "ls-files", "--others", "--exclude-standard", "-z")
+    if diff is None or others is None:
+        return None
+    digest = hashlib.sha256(head.strip() + b"\0" + hashlib.sha256(diff).digest())
+    for name in sorted(item for item in others.split(b"\0") if item):
+        path = root / os.fsdecode(name)
+        content = os.readlink(path).encode() if path.is_symlink() else (sha256(path).encode() if path.is_file() else b"")
+        digest.update(b"\0" + name + b"\0" + content)
+    return digest.hexdigest()
+
+
+def ignored_by_git(path: Path) -> bool:
+    return git_out(path.parent if path.parent.is_dir() else Path.cwd(), "check-ignore", "-q", str(path)) is not None
 
 
 def record(skill: Path, run: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -213,6 +237,9 @@ def record(skill: Path, run: Path, args: argparse.Namespace) -> dict[str, Any]:
     if args.outcome != "verified" and not (args.reason or "").strip():
         raise Invalid(f"a {args.outcome} outcome needs --reason")
     run.mkdir(parents=True, exist_ok=True)
+    top = git_out(run, "rev-parse", "--show-toplevel")
+    if top is not None and not ignored_by_git(run.resolve()):
+        raise Invalid(f"{run}: the run directory is inside a Git worktree and not ignored; add .verify/ to .gitignore")
     path = run / MANIFEST
     manifest = load_manifest(run) if path.exists() else {"version": 1, "skill": skill.name, "records": []}
     if manifest.get("skill") != skill.name:
@@ -223,7 +250,7 @@ def record(skill: Path, run: Path, args: argparse.Namespace) -> dict[str, Any]:
         "outcome": args.outcome,
         "reason": (args.reason or "").strip(),
         "artifacts": [artifact_entry(run, value) for value in args.artifact],
-        "head": head_of(skill),
+        "subject": worktree_fingerprint(skill),
         "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     if not entry["entry"]:
@@ -236,8 +263,11 @@ def record(skill: Path, run: Path, args: argparse.Namespace) -> dict[str, Any]:
             "artifacts": len(entry["artifacts"])}
 
 
-def check(skill: Path, run: Path, features: list[str], everything: bool) -> tuple[list[str], dict[str, Any]]:
+def check(skill: Path, run: Path, features: list[str], everything: bool, fresh: bool = False) -> tuple[list[str], dict[str, Any]]:
     errors = lint(skill)
+    current = worktree_fingerprint(skill) if fresh else None
+    if fresh and current is None:
+        errors.append("--fresh needs the skill to live in a Git worktree")
     manifest = load_manifest(run)
     known = {p.stem for p in feature_files(skill)}
     if manifest.get("skill") != skill.name:
@@ -256,6 +286,8 @@ def check(skill: Path, run: Path, features: list[str], everything: bool) -> tupl
             errors.append(f"{feature}: recorded but no longer in the feature map")
             continue
         summary.setdefault(feature, {name: [] for name in OUTCOMES})[item["outcome"]].append(entry)
+        if fresh and current is not None and item.get("subject") != current:
+            errors.append(f"{feature}: evidence via {entry} is stale; the code changed after it was recorded")
         for artifact in item.get("artifacts", []):
             target = run / artifact["path"]
             if target.is_symlink() or not target.is_file():
@@ -297,6 +329,8 @@ def build_parser() -> argparse.ArgumentParser:
     scope = check_parser.add_mutually_exclusive_group(required=True)
     scope.add_argument("--feature", action="append", default=[], help="feature that must be verified; repeatable")
     scope.add_argument("--all", action="store_true", help="every feature in the map must be verified")
+    check_parser.add_argument("--fresh", action="store_true",
+                              help="fail when the code changed after the evidence was recorded")
     return parser
 
 
@@ -311,7 +345,7 @@ def main() -> int:
         elif args.command == "record":
             errors, detail = [], record(skill, Path(args.run), args)
         else:
-            errors, detail = check(skill, Path(args.run), args.feature, args.all)
+            errors, detail = check(skill, Path(args.run), args.feature, args.all, args.fresh)
     except Invalid as exc:
         print(json.dumps({"valid": False, "errors": [str(exc)]}) if args.json else f"error: {exc}",
               file=sys.stdout if args.json else sys.stderr)

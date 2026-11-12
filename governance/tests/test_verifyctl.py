@@ -180,6 +180,43 @@ class VerifyctlTests(unittest.TestCase):
         self.record("create-note", "failed", "--reason", "exit code 1", entry="CLI")
         self.assertEqual(self.check("--feature", "create-note").returncode, 3)
 
+    def test_fresh_rejects_evidence_recorded_before_a_code_change(self) -> None:
+        repo = self.temp / "repo"
+        skill = repo / ".cursor" / "skills" / "verify-notes"
+        shutil.copytree(self.skill, skill)
+        (repo / ".gitignore").write_text(".verify/\n", encoding="utf-8")
+        (repo / "app.py").write_text("print(1)\n", encoding="utf-8")
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "base"], check=True)
+        run_dir = repo / ".verify" / "runs" / "r1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "list.png").write_bytes(b"proof")
+        base = ["--skill", str(skill), "--run", str(run_dir)]
+        recorded = run("record", *base, "--feature", "create-note", "--entry", "button", "--outcome", "verified",
+                       "--artifact", "list.png")
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        self.assertEqual(run("check", *base, "--feature", "create-note", "--fresh").returncode, 0)
+        (repo / "app.py").write_text("print(2)\n", encoding="utf-8")
+        stale = run("--json", "check", *base, "--feature", "create-note", "--fresh")
+        self.assertEqual(stale.returncode, 3)
+        self.assertTrue(any("stale" in e for e in json.loads(stale.stdout)["errors"]))
+        self.assertEqual(run("check", *base, "--feature", "create-note").returncode, 0)
+
+    def test_record_refuses_an_unignored_run_directory_inside_a_worktree(self) -> None:
+        repo = self.temp / "repo2"
+        skill = repo / "verify-notes"
+        shutil.copytree(self.skill, skill)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        run_dir = repo / "runs"
+        run_dir.mkdir()
+        (run_dir / "p.png").write_bytes(b"x")
+        result = run("record", "--skill", str(skill), "--run", str(run_dir), "--feature", "create-note",
+                     "--entry", "button", "--outcome", "verified", "--artifact", "p.png")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not ignored", result.stderr)
+
     def test_check_refuses_a_run_without_a_manifest(self) -> None:
         self.assertEqual(self.check("--all").returncode, 2)
 
