@@ -114,7 +114,7 @@ cloud agent with no human at a terminal has no way to obtain the freeze approval
 |---|---|
 | Code quality | The 24 `principle-*` skills, `tdd`, `blast-radius`, `no-comments` (with the `comment-sicko` agent), `reflect`, `benchmark-checklist`, `typescript-best-practices` |
 | Context | `how`, `why`, `recall`, `architect`, `teach`, `sharpen` |
-| Scale | `swarm`, `arena`, `figure-it-out`, `show-me-your-work`, `ketchup`, and the autonomous-run, orchestrate, autopilot, babysit and shipping playbooks |
+| Scale | `swarm`, `arena`, `figure-it-out`, `show-me-your-work`, `ketchup`, `bro`, and the autonomous-run, orchestrate, autopilot, babysit and shipping playbooks |
 | Formal verification | `create-formal-verification-skill`, `maintain-formal-verification-skill`, `statechart` |
 | Support | `setup-pstack` (model routing; still writes `pstack-models.mdc`), `unslop`, `technical-writing`, the `govern-agent` delegate |
 
@@ -124,7 +124,7 @@ skill the plugin does not ship. Some steps still name skills from Cursor's own
 `cursor-team-kit` plugin (`deslop`, `control-ui`, `control-cli`); the Governance section
 tells the agent what to do in their place. The copied TypeScript helpers
 (`statechart`, `govern/scripts`) need `bun` and their own tests were not run here.
-Not brought in: `make-bot-ui`, `ketchup-video`, `automate-me`, `bro`, `poteto-help`
+Not brought in: `make-bot-ui`, `ketchup-video`, `automate-me`, `poteto-help`
 and the Benny automation pack.
 
 ## Planned, in order
